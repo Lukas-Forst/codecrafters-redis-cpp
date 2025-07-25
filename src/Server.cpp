@@ -101,7 +101,15 @@ std::string handle_request(const std::string& req) {
                 // If tester expects simple string back, keep '+'; if bulk, adapt.
                 reply = "+" + a.elems[1] + "\r\n";
             }
-        } else {
+        }else if (cmd == "ECHO") {
+    if (a.elems.size() == 2) {
+        const std::string& msg = a.elems[1];
+        reply = "$" + std::to_string(msg.size()) + "\r\n" + msg + "\r\n";
+    } else {
+        reply = "-ERR wrong number of arguments for 'echo' command\r\n";
+    }
+}
+        else {
             reply = "-ERR unknown command\r\n";
         }
     } else {
