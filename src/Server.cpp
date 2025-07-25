@@ -9,7 +9,10 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-
+#include <thread>
+#include <semaphore>   // C++20
+#include <atomic>
+#include <vector>
 // ------------- utilities -----------------
 
 static bool send_all(int fd, const void* buf, size_t len) {
