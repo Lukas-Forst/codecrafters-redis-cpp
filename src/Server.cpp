@@ -139,25 +139,42 @@ void handle_client(int client_fd) {
 
 
 // ------------- accept loop -----------------
+std::counting_semaphore<128> slots(128);
+std::atomic_bool running = true;
 
 void serve_forever(int server_fd) {
-    while (true) {
+    std::vector<std::jthread> workers; // optionally keep to join on shutdown
+
+    while (running) {
         sockaddr_in caddr{};
         socklen_t clen = sizeof(caddr);
         int client_fd = ::accept(server_fd,
                                  reinterpret_cast<sockaddr*>(&caddr),
                                  &clen);
         if (client_fd < 0) {
-            if (errno == EINTR) continue; // interrupted by signal
+            if (errno == EINTR) continue;
             perror("accept");
-            break; // decide if you want to break or continue
+            continue; // or break, depending on your policy
         }
 
-        std::cout << "Client connected\n";
-        handle_client(client_fd);
-        close(client_fd);
+        slots.acquire(); // block if we’re at capacity
+
+        // Spawn a thread that handles this client
+        workers.emplace_back([client_fd](std::stop_token st) {
+            // RAII to ensure close + release the slot
+            struct Guard {
+                int fd;
+                ~Guard(){ ::close(fd); slots.release(); }
+            } guard{client_fd};
+
+            handle_client(client_fd); // your loop that serves many commands
+        });
+        // If you don't want to store workers, call workers.back().detach() or use std::thread and detach it.
     }
+
+    // Optional: if you keep workers, they will auto-join when `workers` goes out of scope.
 }
+
 
 // ------------- setup socket -----------------
 
