@@ -1,14 +1,16 @@
 #include <iostream>
 #include <string>
-#include <string_view>
 #include <vector>
 #include <algorithm>
+#include <optional>
 #include <csignal>
 #include <cstring>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+
+// ------------- utilities -----------------
 
 static bool send_all(int fd, const void* buf, size_t len) {
     const char* p = static_cast<const char*>(buf);
@@ -22,28 +24,29 @@ static bool send_all(int fd, const void* buf, size_t len) {
 }
 
 static void to_upper(std::string& s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::toupper(c); });
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return std::toupper(c); });
 }
 
-// Very small RESP parser for arrays of bulk strings only; good enough for "*1\r\n$4\r\nPING\r\n"
+// ------------- RESP parsing bits (your existing code, unchanged) -----------------
+
 struct RespArray {
     std::vector<std::string> elems;
 };
 
 static bool parse_int(const std::string& s, size_t& pos, long& out) {
-    // expects digits until \r\n
     size_t start = pos;
     bool neg = false;
     if (pos < s.size() && s[pos] == '-') { neg = true; ++pos; }
-    long val = 0;
+    long v = 0;
     while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
-        val = val * 10 + (s[pos] - '0');
+        v = v * 10 + (s[pos] - '0');
         ++pos;
     }
-    if (pos + 1 >= s.size() || s[pos] != '\r' || s[pos+1] != '\n') return false;
+    if (pos + 1 >= s.size() || s[pos] != '\r' || s[pos + 1] != '\n') return false;
     pos += 2;
-    out = neg ? -val : val;
-    return pos > start + 2; // read something
+    out = neg ? -v : v;
+    return pos > start + 2;
 }
 
 static bool parse_bulk_string(const std::string& s, size_t& pos, std::string& out) {
@@ -51,99 +54,55 @@ static bool parse_bulk_string(const std::string& s, size_t& pos, std::string& ou
     ++pos;
     long len = 0;
     if (!parse_int(s, pos, len)) return false;
-    if (len < 0) { out.clear(); return true; } // Null bulk string, not needed here
-    if (static_cast<size_t>(pos + len + 2) > s.size()) return false;
+    if (len < 0) { out.clear(); return true; } // null bulk string (not used here)
+    if (pos + static_cast<size_t>(len) + 2 > s.size()) return false;
     out.assign(s.data() + pos, static_cast<size_t>(len));
     pos += static_cast<size_t>(len);
-    if (pos + 1 >= s.size() || s[pos] != '\r' || s[pos+1] != '\n') return false;
+    if (pos + 1 >= s.size() || s[pos] != '\r' || s[pos + 1] != '\n') return false;
     pos += 2;
     return true;
 }
 
-static bool parse_resp_array_of_bulk_strings(const std::string& s, RespArray& arr) {
+// ---- the missing definition ----
+bool parse_resp_array_of_bulk_strings(const std::string& s, RespArray& arr) {
     size_t pos = 0;
-    if (s.empty() || s[0] != '*') return false;
+    if (s.empty() || s[pos] != '*') return false;
     ++pos;
     long n = 0;
     if (!parse_int(s, pos, n) || n < 0) return false;
+
     arr.elems.clear();
     arr.elems.reserve(static_cast<size_t>(n));
     for (long i = 0; i < n; ++i) {
-        std::string bs;
-        if (!parse_bulk_string(s, pos, bs)) return false;
-        arr.elems.push_back(std::move(bs));
+        std::string elem;
+        if (!parse_bulk_string(s, pos, elem)) return false;
+        arr.elems.push_back(std::move(elem));
     }
     return true;
 }
 
-int main() {
-    std::cout << std::unitbuf;
-    std::cerr << std::unitbuf;
+// ------------- request handling -----------------
 
-    std::signal(SIGPIPE, SIG_IGN);
-
-    int server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) { std::cerr << "Failed to create server socket\n"; return 1; }
-
-    int reuse = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-        std::cerr << "setsockopt failed\n";
-        return 1;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(6379);
-
-    if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        std::cerr << "Failed to bind to port 6379\n";
-        return 1;
-    }
-
-    if (listen(server_fd, 16) != 0) {
-        std::cerr << "listen failed\n";
-        return 1;
-    }
-
-    std::cout << "Waiting for a client to connect...\n";
-    sockaddr_in caddr{};
-    socklen_t clen = sizeof(caddr);
-    int client_fd = ::accept(server_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
-    if (client_fd < 0) {
-        std::cerr << "accept failed\n";
-        return 1;
-    }
-    std::cout << "Client connected\n";
-
-    // Read once (simple test harness). For real-world, loop and accumulate until full command is received.
-    char buf[4096];
-    ssize_t n = ::recv(client_fd, buf, sizeof(buf), 0);
-    if (n <= 0) {
-        std::cerr << "recv failed\n";
-        close(client_fd);
-        close(server_fd);
-        return 1;
-    }
-    std::string req(buf, buf + n);
-
+std::string handle_request(const std::string& req) {
     RespArray a;
     std::string reply;
+
     if (parse_resp_array_of_bulk_strings(req, a) && !a.elems.empty()) {
         std::string cmd = a.elems[0];
         to_upper(cmd);
+
         if (cmd == "PING") {
             if (a.elems.size() == 1) {
-                reply = "+PONG\r\n";  // what your tester expects
+                reply = "+PONG\r\n";
             } else {
-                // Redis returns the message as a bulk string; but if your tester wants simple string, adapt accordingly.
+                // If tester expects simple string back, keep '+'; if bulk, adapt.
                 reply = "+" + a.elems[1] + "\r\n";
             }
         } else {
             reply = "-ERR unknown command\r\n";
         }
     } else {
-        // Very naive fallback: if you ever get the inline "PING\r\n" form
+        // fallback if someone sends inline "PING\r\n"
         if (req.rfind("PING", 0) == 0) {
             reply = "+PONG\r\n";
         } else {
@@ -151,8 +110,100 @@ int main() {
         }
     }
 
-    (void)send_all(client_fd, reply.data(), reply.size());
-    close(client_fd);
+    return reply;
+}
+
+// ------------- per-client loop -----------------
+
+void handle_client(int client_fd) {
+    for (;;) {
+        char buf[4096];
+        ssize_t n = ::recv(client_fd, buf, sizeof(buf), 0);
+        if (n == 0) {
+            // client closed the connection
+            break;
+        }
+        if (n < 0) {
+            perror("recv");
+            break;
+        }
+
+        std::string req(buf, buf + n);
+        std::string reply = handle_request(req);
+
+        if (!send_all(client_fd, reply.data(), reply.size())) {
+            break; // client closed while we were sending
+        }
+    }
+}
+
+
+// ------------- accept loop -----------------
+
+void serve_forever(int server_fd) {
+    while (true) {
+        sockaddr_in caddr{};
+        socklen_t clen = sizeof(caddr);
+        int client_fd = ::accept(server_fd,
+                                 reinterpret_cast<sockaddr*>(&caddr),
+                                 &clen);
+        if (client_fd < 0) {
+            if (errno == EINTR) continue; // interrupted by signal
+            perror("accept");
+            break; // decide if you want to break or continue
+        }
+
+        std::cout << "Client connected\n";
+        handle_client(client_fd);
+        close(client_fd);
+    }
+}
+
+// ------------- setup socket -----------------
+
+int create_listen_socket(uint16_t port) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    int reuse = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    if (listen(fd, 16) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+// ------------- main -----------------
+
+int main() {
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
+    std::signal(SIGPIPE, SIG_IGN);
+
+    int server_fd = create_listen_socket(6379);
+    if (server_fd < 0) {
+        std::cerr << "Failed to setup server socket\n";
+        return 1;
+    }
+
+    std::cout << "Waiting for a client to connect...\n";
+    serve_forever(server_fd);
+
     close(server_fd);
     return 0;
 }
