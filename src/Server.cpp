@@ -13,6 +13,7 @@ int main(int argc, char **argv) {
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
   
+  
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
    std::cerr << "Failed to create server socket\n";
@@ -51,10 +52,19 @@ int main(int argc, char **argv) {
   //::cout << "Logs from your program will appear here!\n";
 
   // Uncomment this block to pass the first stage
-  // 
+  
+  std::string_view input = argv[1];
   accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
   std::cout << "Client connected\n";
   // 
+
+  if ( input == "PING"){
+    std::cout << "+PONG\r\n";
+  } else {
+    std::cout << input;
+  }
+
+
   close(server_fd);
 
   return 0;
