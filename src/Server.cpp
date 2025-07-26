@@ -19,12 +19,14 @@
 static std::unordered_map<std::string, std::string> store;
 static std::unordered_map<std::string, std::chrono::steady_clock::time_point> ttl;
 
+static std::unordered_map<std::string, std::vector<std::string>> lists; // lists
+
 static bool send_all(int fd, const void* buf, size_t len) {
     const char* p = static_cast<const char*>(buf);
     while (len > 0) {
         ssize_t n = ::send(fd, p, len, 0);
         if (n <= 0) return false;
-        p   += n;
+        p   += n; 
         len -= n;
     }
     return true;
@@ -81,6 +83,7 @@ static bool parse_bulk_string(const std::string& s, size_t& pos, std::string& ou
     pos += 2;
     return true;
 }
+
 
 // ---- the missing definition ----
 bool parse_resp_array_of_bulk_strings(const std::string& s, RespArray& arr) {
@@ -177,8 +180,28 @@ std::string handle_request(const std::string& req) {
                 reply = "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
             }
         }
+            } else {
+                reply = "-ERR wrong number of arguments for 'get' command\r\n";
+            }
+        }
+        else if (cmd == "RPUSH") {
+    if (a.elems.size() >= 3) {
+        const std::string& key = a.elems[1];
+
+        // Type check: if the key exists as a string, it's a WRONGTYPE error.
+        if (store.find(key) != store.end()) {
+            reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        } else {
+            // Append all provided elements (supports RPUSH key e1 e2 e3 ...)
+            auto& vec = lists[key]; // creates list if not present
+            vec.reserve(vec.size() + (a.elems.size() - 2)); // tiny perf nicety
+            for (std::size_t i = 2; i < a.elems.size(); ++i) {
+                vec.push_back(a.elems[i]);
+            }
+            reply = ":" + std::to_string(vec.size()) + "\r\n"; // RESP Integer
+        }
     } else {
-        reply = "-ERR wrong number of arguments for 'get' command\r\n";
+        reply = "-ERR wrong number of arguments for 'rpush' command\r\n";
     }
 }
 
