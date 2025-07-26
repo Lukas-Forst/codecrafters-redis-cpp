@@ -83,6 +83,42 @@ static bool parse_bulk_string(const std::string& s, size_t& pos, std::string& ou
     pos += 2;
     return true;
 }
+static inline std::string bulk(const std::string& s) {
+    std::string out;
+    out.reserve(1 + 20 + 2 + s.size() + 2);
+    out += "$";
+    out += std::to_string(s.size());
+    out += "\r\n";
+    out += s;
+    out += "\r\n";
+    return out;
+}
+
+static inline std::string bulk_array(const std::vector<std::string>& vals) {
+    std::string out;
+    out.reserve(1 + 20 + 2);
+    out += "*";
+    out += std::to_string(vals.size());
+    out += "\r\n";
+    for (const auto& v : vals) {
+        out += "$";
+        out += std::to_string(v.size());
+        out += "\r\n";
+        out += v;
+        out += "\r\n";
+    }
+    return out;
+}
+
+static bool parse_ll(const std::string& s, long long& out) {
+    try {
+        size_t idx = 0;
+        out = std::stoll(s, &idx, 10);
+        return idx == s.size();
+    } catch (...) {
+        return false;
+    }
+}
 
 
 // ---- the missing definition ----
@@ -200,11 +236,101 @@ std::string handle_request(const std::string& req) {
             }
             reply = ":" + std::to_string(vec.size()) + "\r\n"; // RESP Integer
         }
-    } else {
+    }
+    
+    else {
         reply = "-ERR wrong number of arguments for 'rpush' command\r\n";
+    }
+        }
+
+
+
+        else if (cmd == "LRANGE") {
+    if (a.elems.size() == 4) {
+        const std::string& key = a.elems[1];
+
+        // Type check against string keys
+        if (store.find(key) != store.end()) {
+            reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        } else {
+            auto it = lists.find(key);
+            if (it == lists.end()) {
+                reply = "*0\r\n"; // missing key => empty array
+            } else {
+                const auto& vec = it->second;
+                const long long len = static_cast<long long>(vec.size());
+
+                long long start = 0, stop = 0;
+                if (!parse_ll(a.elems[2], start) || !parse_ll(a.elems[3], stop)) {
+                    reply = "-ERR value is not an integer or out of range\r\n";
+                } else if (len == 0) {
+                    reply = "*0\r\n"; // empty list
+                } else {
+                    // Normalize negatives: -1 is last element
+                    if (start < 0) start = len + start;
+                    if (stop  < 0) stop  = len + stop;
+
+                    // Clamp to [0, len-1]
+                    if (start < 0) start = 0;
+                    if (stop  < 0) stop  = 0;
+                    if (start >= len) start = len;     // may exceed -> empty
+                    if (stop  >= len) stop  = len - 1;
+
+                    if (start > stop || start >= len) {
+                        reply = "*0\r\n";
+                    } else {
+                        // Collect [start, stop] inclusive
+                        std::vector<std::string> slice;
+                        slice.reserve(static_cast<size_t>(stop - start + 1));
+                        for (long long i = start; i <= stop; ++i) {
+                            slice.push_back(vec[static_cast<size_t>(i)]);
+                        }
+                        reply = bulk_array(slice);
+                    }
+                }
+            }
+        }
+    } else {
+        reply = "-ERR wrong number of arguments for 'lrange' command\r\n";
     }
 }
 
+else if (cmd == "LINDEX") {
+    if (a.elems.size() == 3) {
+        const std::string& key = a.elems[1];
+
+        // Type check
+        if (store.find(key) != store.end()) {
+            reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        } else {
+            auto it = lists.find(key);
+            if (it == lists.end()) {
+                reply = "$-1\r\n"; // missing key -> null bulk
+            } else {
+                const auto& vec = it->second;
+                long long idx = 0;
+                if (!parse_ll(a.elems[2], idx)) {
+                    reply = "-ERR value is not an integer or out of range\r\n";
+                } else {
+                    long long len = static_cast<long long>(vec.size());
+                    if (len == 0) {
+                        reply = "$-1\r\n";
+                    } else {
+                        if (idx < 0) idx = len + idx; // negative index
+                        if (idx < 0 || idx >= len) {
+                            reply = "$-1\r\n";        // OOB -> null bulk
+                        } else {
+                            const std::string& v = vec[static_cast<size_t>(idx)];
+                            reply = bulk(v);          // $len\r\nv\r\n
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        reply = "-ERR wrong number of arguments for 'lindex' command\r\n";
+    }
+}
 
               
         else {
