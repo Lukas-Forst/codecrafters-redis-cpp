@@ -14,6 +14,9 @@
 #include <atomic>
 #include <vector>
 // ------------- utilities -----------------
+#include <unordered_map>  // add this
+static std::unordered_map<std::string, std::string> store;
+
 
 static bool send_all(int fd, const void* buf, size_t len) {
     const char* p = static_cast<const char*>(buf);
@@ -102,13 +105,37 @@ std::string handle_request(const std::string& req) {
                 reply = "+" + a.elems[1] + "\r\n";
             }
         }else if (cmd == "ECHO") {
-    if (a.elems.size() == 2) {
-        const std::string& msg = a.elems[1];
-        reply = "$" + std::to_string(msg.size()) + "\r\n" + msg + "\r\n";
-    } else {
-        reply = "-ERR wrong number of arguments for 'echo' command\r\n";
-    }
+            if (a.elems.size() == 2) {
+                const std::string& msg = a.elems[1];
+                reply = "$" + std::to_string(msg.size()) + "\r\n" + msg + "\r\n";
+            } else {
+                reply = "-ERR wrong number of arguments for 'echo' command\r\n";
+            }
+        } else if (cmd == "SET") {
+            if (a.elems.size() == 3) {
+                const std::string& key = a.elems[1];
+                const std::string& val = a.elems[2];
+                store.insert_or_assign(key, val);
+                reply = "+OK\r\n"; // Simple String
+            } else {
+                reply = "-ERR wrong number of arguments for 'set' command\r\n";
+            }
+        }else if (cmd == "GET") {
+            if (a.elems.size() == 2) {
+                const std::string& key = a.elems[1];
+                auto it = store.find(key);
+                if (it == store.end()) {
+                    reply = "$-1\r\n"; // Null bulk string
+                } else {
+                    const std::string& val = it->second;
+                    reply = "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                }
+            } else {
+                reply = "-ERR wrong number of arguments for 'get' command\r\n";
+            }
 }
+
+              
         else {
             reply = "-ERR unknown command\r\n";
         }
