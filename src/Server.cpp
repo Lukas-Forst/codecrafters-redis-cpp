@@ -15,8 +15,9 @@
 #include <vector>
 // ------------- utilities -----------------
 #include <unordered_map>  // add this
+#include <chrono>
 static std::unordered_map<std::string, std::string> store;
-
+static std::unordered_map<std::string, std::chrono::steady_clock::time_point> ttl;
 
 static bool send_all(int fd, const void* buf, size_t len) {
     const char* p = static_cast<const char*>(buf);
@@ -28,6 +29,18 @@ static bool send_all(int fd, const void* buf, size_t len) {
     }
     return true;
 }
+static bool is_expired_now(const std::string& key) {
+    using clock = std::chrono::steady_clock;
+    auto it = ttl.find(key);
+    if (it == ttl.end()) return false;
+    if (clock::now() >= it->second) {
+        store.erase(key);
+        ttl.erase(it);
+        return true;
+    }
+    return false;
+}
+
 
 static void to_upper(std::string& s) {
     std::transform(s.begin(), s.end(), s.begin(),
@@ -112,28 +125,63 @@ std::string handle_request(const std::string& req) {
                 reply = "-ERR wrong number of arguments for 'echo' command\r\n";
             }
         } else if (cmd == "SET") {
-            if (a.elems.size() == 3) {
-                const std::string& key = a.elems[1];
-                const std::string& val = a.elems[2];
-                store.insert_or_assign(key, val);
-                reply = "+OK\r\n"; // Simple String
+    if (a.elems.size() == 3) {
+        const std::string& key = a.elems[1];
+        const std::string& val = a.elems[2];
+        store.insert_or_assign(key, val);
+        ttl.erase(key);                 // clear previous expiry if any
+        reply = "+OK\r\n";
+    } else if (a.elems.size() == 5) {
+        const std::string& key = a.elems[1];
+        const std::string& val = a.elems[2];
+
+        std::string opt = a.elems[3];
+        to_upper(opt);                   // case-insensitive option
+        if (opt != "PX") {
+            reply = "-ERR syntax error\r\n";
+                } else {
+                    // parse milliseconds (non-negative)
+                    long long ms = 0;
+                    try {
+                        size_t idx = 0;
+                        ms = std::stoll(a.elems[4], &idx, 10);
+                        if (idx != a.elems[4].size() || ms < 0) {
+                            reply = "-ERR value is not an integer or out of range\r\n";
+                        } else {
+                            store.insert_or_assign(key, val);
+                            using clock = std::chrono::steady_clock;
+                            ttl[key] = clock::now() + std::chrono::milliseconds(ms);
+                            reply = "+OK\r\n";
+                        }
+                    } catch (...) {
+                        reply = "-ERR value is not an integer or out of range\r\n";
+                    }
+                }
             } else {
                 reply = "-ERR wrong number of arguments for 'set' command\r\n";
             }
-        }else if (cmd == "GET") {
-            if (a.elems.size() == 2) {
-                const std::string& key = a.elems[1];
-                auto it = store.find(key);
-                if (it == store.end()) {
-                    reply = "$-1\r\n"; // Null bulk string
-                } else {
-                    const std::string& val = it->second;
-                    reply = "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
-                }
+        }
+        else if (cmd == "GET") {
+    if (a.elems.size() == 2) {
+        const std::string& key = a.elems[1];
+
+        // lazy expiration: drop and return null if expired
+        if (is_expired_now(key)) {
+            reply = "$-1\r\n";
+        } else {
+            auto it = store.find(key);
+            if (it == store.end()) {
+                reply = "$-1\r\n"; // Missing key
             } else {
-                reply = "-ERR wrong number of arguments for 'get' command\r\n";
+                const std::string& val = it->second;
+                reply = "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
             }
+        }
+    } else {
+        reply = "-ERR wrong number of arguments for 'get' command\r\n";
+    }
 }
+
 
               
         else {
