@@ -246,91 +246,110 @@ std::string handle_request(const std::string& req) {
 
 
         else if (cmd == "LRANGE") {
-    if (a.elems.size() == 4) {
-        const std::string& key = a.elems[1];
+            if (a.elems.size() == 4) {
+                const std::string& key = a.elems[1];
 
-        // Type check against string keys
-        if (store.find(key) != store.end()) {
-            reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
-        } else {
-            auto it = lists.find(key);
-            if (it == lists.end()) {
-                reply = "*0\r\n"; // missing key => empty array
-            } else {
-                const auto& vec = it->second;
-                const long long len = static_cast<long long>(vec.size());
-
-                long long start = 0, stop = 0;
-                if (!parse_ll(a.elems[2], start) || !parse_ll(a.elems[3], stop)) {
-                    reply = "-ERR value is not an integer or out of range\r\n";
-                } else if (len == 0) {
-                    reply = "*0\r\n"; // empty list
+                // Type check against string keys
+                if (store.find(key) != store.end()) {
+                    reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
                 } else {
-                    // Normalize negatives: -1 is last element
-                    if (start < 0) start = len + start;
-                    if (stop  < 0) stop  = len + stop;
-
-                    // Clamp to [0, len-1]
-                    if (start < 0) start = 0;
-                    if (stop  < 0) stop  = 0;
-                    if (start >= len) start = len;     // may exceed -> empty
-                    if (stop  >= len) stop  = len - 1;
-
-                    if (start > stop || start >= len) {
-                        reply = "*0\r\n";
+                    auto it = lists.find(key);
+                    if (it == lists.end()) {
+                        reply = "*0\r\n"; // missing key => empty array
                     } else {
-                        // Collect [start, stop] inclusive
-                        std::vector<std::string> slice;
-                        slice.reserve(static_cast<size_t>(stop - start + 1));
-                        for (long long i = start; i <= stop; ++i) {
-                            slice.push_back(vec[static_cast<size_t>(i)]);
-                        }
-                        reply = bulk_array(slice);
-                    }
-                }
-            }
-        }
-    } else {
-        reply = "-ERR wrong number of arguments for 'lrange' command\r\n";
-    }
-}
+                        const auto& vec = it->second;
+                        const long long len = static_cast<long long>(vec.size());
 
-else if (cmd == "LINDEX") {
-    if (a.elems.size() == 3) {
-        const std::string& key = a.elems[1];
-
-        // Type check
-        if (store.find(key) != store.end()) {
-            reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
-        } else {
-            auto it = lists.find(key);
-            if (it == lists.end()) {
-                reply = "$-1\r\n"; // missing key -> null bulk
-            } else {
-                const auto& vec = it->second;
-                long long idx = 0;
-                if (!parse_ll(a.elems[2], idx)) {
-                    reply = "-ERR value is not an integer or out of range\r\n";
-                } else {
-                    long long len = static_cast<long long>(vec.size());
-                    if (len == 0) {
-                        reply = "$-1\r\n";
-                    } else {
-                        if (idx < 0) idx = len + idx; // negative index
-                        if (idx < 0 || idx >= len) {
-                            reply = "$-1\r\n";        // OOB -> null bulk
+                        long long start = 0, stop = 0;
+                        if (!parse_ll(a.elems[2], start) || !parse_ll(a.elems[3], stop)) {
+                            reply = "-ERR value is not an integer or out of range\r\n";
+                        } else if (len == 0) {
+                            reply = "*0\r\n"; // empty list
                         } else {
-                            const std::string& v = vec[static_cast<size_t>(idx)];
-                            reply = bulk(v);          // $len\r\nv\r\n
+                            // Normalize negatives: -1 is last element
+                            if (start < 0) start = len + start;
+                            if (stop  < 0) stop  = len + stop;
+
+                            // Clamp to [0, len-1]
+                            if (start < 0) start = 0;
+                            if (stop  < 0) stop  = 0;
+                            if (start >= len) start = len;     // may exceed -> empty
+                            if (stop  >= len) stop  = len - 1;
+
+                            if (start > stop || start >= len) {
+                                reply = "*0\r\n";
+                            } else {
+                                // Collect [start, stop] inclusive
+                                std::vector<std::string> slice;
+                                slice.reserve(static_cast<size_t>(stop - start + 1));
+                                for (long long i = start; i <= stop; ++i) {
+                                    slice.push_back(vec[static_cast<size_t>(i)]);
+                                }
+                                reply = bulk_array(slice);
+                            }
                         }
                     }
                 }
+            } else {
+                reply = "-ERR wrong number of arguments for 'lrange' command\r\n";
             }
         }
-    } else {
-        reply = "-ERR wrong number of arguments for 'lindex' command\r\n";
-    }
-}
+
+        else if (cmd == "LINDEX") {
+            if (a.elems.size() == 3) {
+                const std::string& key = a.elems[1];
+
+                // Type check
+                if (store.find(key) != store.end()) {
+                    reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+                } else {
+                    auto it = lists.find(key);
+                    if (it == lists.end()) {
+                        reply = "$-1\r\n"; // missing key -> null bulk
+                    } else {
+                        const auto& vec = it->second;
+                        long long idx = 0;
+                        if (!parse_ll(a.elems[2], idx)) {
+                            reply = "-ERR value is not an integer or out of range\r\n";
+                        } else {
+                            long long len = static_cast<long long>(vec.size());
+                            if (len == 0) {
+                                reply = "$-1\r\n";
+                            } else {
+                                if (idx < 0) idx = len + idx; // negative index
+                                if (idx < 0 || idx >= len) {
+                                    reply = "$-1\r\n";        // OOB -> null bulk
+                                } else {
+                                    const std::string& v = vec[static_cast<size_t>(idx)];
+                                    reply = bulk(v);          // $len\r\nv\r\n
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                reply = "-ERR wrong number of arguments for 'lindex' command\r\n";
+            }
+        } else if (cmd == "LPUSH"){
+            if (a.elems.size() >= 3) {
+            const std::string& key = a.elems[1];
+
+        // Type check: if the key exists as a string, it's a WRONGTYPE error.
+            if (store.find(key) != store.end()) {
+                reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+            } else {
+            // Preppend all provided elements (supports RPUSH key e1 e2 e3 ...)
+            auto& vec = lists[key]; // creates list if not present
+            vec.reserve(vec.size() + (a.elems.size() - 2)); // tiny perf nicety
+            for (std::size_t i = 2; i < a.elems.size(); ++i) {
+                vec.insert(vec.begin(), a.elems[i]);
+                
+            }
+            reply = ":" + std::to_string(vec.size()) + "\r\n"; // RESP Integer
+            }
+            }
+
+        }
 
               
         else {
