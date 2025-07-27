@@ -361,7 +361,21 @@ std::string handle_request(const std::string& req) {
                 reply = ":"+ std::to_string(vec.size()) +"\r\n";
                 
         }
-    }}
+    }}else if (cmd == "LPOP"){
+            if (a.elems.size() == 2) {
+            const std::string& key = a.elems[1];
+            if (store.find(key) != store.end()) {
+                reply = "$-1\r\n";
+            } else {
+                auto& vec = lists[key];
+                std::string first = vec.front() ;  // store the value
+                vec.erase(vec.begin());
+                reply = "$"+ std::to_string(first.size()) +"\r\n" + first + "\r\n";
+                
+        }
+            }
+        
+        }
 
               
         else {
