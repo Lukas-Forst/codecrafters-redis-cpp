@@ -349,7 +349,19 @@ std::string handle_request(const std::string& req) {
             }
             }
 
+        } else if (cmd == "LLEN"){
+            if (a.elems.size() == 2) {
+            const std::string& key = a.elems[1];
+
+        // Type check: if the key exists as a string, it's a WRONGTYPE error.
+            if (store.find(key) != store.end()) {
+                reply = ":0\r\n";
+            } else {
+                auto& vec = lists[key];
+                reply = ":"+ std::to_string(vec.size()) +"\r\n";
+                
         }
+    }}
 
               
         else {
