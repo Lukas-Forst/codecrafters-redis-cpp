@@ -361,21 +361,52 @@ std::string handle_request(const std::string& req) {
                 reply = ":"+ std::to_string(vec.size()) +"\r\n";
                 
         }
-    }}else if (cmd == "LPOP"){
-            if (a.elems.size() == 2) {
-            const std::string& key = a.elems[1];
-            if (store.find(key) != store.end()) {
-                reply = "$-1\r\n";
-            } else {
-                auto& vec = lists[key];
-                std::string first = vec.front() ;  // store the value
-                vec.erase(vec.begin());
-                reply = "$"+ std::to_string(first.size()) +"\r\n" + first + "\r\n";
-                
-        }
-            }
+    }}else if (cmd == "LPOP") {
+    if (a.elems.size() == 2) {
+        // LPOP key - single element
+        const std::string& key = a.elems[1];
         
+        if (lists.find(key) == lists.end() || lists[key].empty()) {
+            reply = "$-1\r\n";  // Key doesn't exist or list is empty
+        } else {
+            auto& vec = lists[key];
+            std::string first = vec.front();
+            vec.erase(vec.begin());
+            reply = "$" + std::to_string(first.size()) + "\r\n" + first + "\r\n";
+            
+            // Clean up empty list
+            if (vec.empty()) {
+                lists.erase(key);
+            }
         }
+    } 
+    else if (a.elems.size() == 3) {
+        // LPOP key count - multiple elements
+        const std::string& key = a.elems[1];
+        
+        if (lists.find(key) == lists.end() || lists[key].empty()) {
+            reply = "*0\r\n";  // Return empty array
+        } else {
+            auto& vec = lists[key];
+            int count = std::stoi(a.elems[2]);
+            int actualCount = std::min(count, static_cast<int>(vec.size()));
+            
+            // Build array response
+            reply = "*" + std::to_string(actualCount) + "\r\n";
+            
+            for (int i = 0; i < actualCount; ++i) {
+                std::string element = vec.front();
+                vec.erase(vec.begin());
+                reply += "$" + std::to_string(element.size()) + "\r\n" + element + "\r\n";
+            }
+            
+            // Clean up empty list
+            if (vec.empty()) {
+                lists.erase(key);
+            }
+        }
+    }
+}
 
               
         else {
