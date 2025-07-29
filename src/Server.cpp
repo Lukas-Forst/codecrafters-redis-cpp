@@ -558,6 +558,9 @@ std::string handle_request(const std::string& req, int client_fd) {
 
                 stream.push_back(StreamEntry{ final_id, fields });
                 reply = "$" + std::to_string(final_id.size()) + "\r\n" + final_id + "\r\n";
+                
+                // Notify any waiting XREAD clients
+                server_state.waiting[key].notify_all();
             }
         }
     } else {
@@ -866,58 +869,132 @@ else if (cmd == "XRANGE") {
 }
 
 else if (cmd == "XREAD") {
-    // XREAD streams stream_key1 stream_key2 ... id1 id2 ...
-    // Minimum: XREAD streams stream_key id (4 elements total)
-    if (a.elems.size() >= 4 && a.elems.size() % 2 == 0) {
-        if (a.elems[1] != "streams") {
-            reply = "-ERR syntax error\r\n";
+    // XREAD [block timeout] streams stream_key1 stream_key2 ... id1 id2 ...
+    bool is_blocking = false;
+    double timeout_ms = 0.0;
+    size_t streams_index = 1;
+    
+    // Check for block parameter
+    if (a.elems.size() >= 6 && a.elems[1] == "block") {
+        is_blocking = true;
+        if (!parse_timeout(a.elems[2], timeout_ms)) {
+            reply = "-ERR timeout is not a float or out of range\r\n";
         } else {
-            // Parse streams and IDs
-            size_t num_streams = (a.elems.size() - 2) / 2;
-            std::vector<std::pair<std::string, std::vector<StreamEntry>>> results;
-            
-            bool has_error = false;
-            for (size_t i = 0; i < num_streams && !has_error; ++i) {
-                const std::string& stream_key = a.elems[2 + i];
-                const std::string& start_id = a.elems[2 + num_streams + i];
+            streams_index = 3;
+        }
+    }
+    
+    if (reply.empty()) {
+        // Check minimum arguments and structure
+        if (a.elems.size() >= streams_index + 3 && (a.elems.size() - streams_index - 1) % 2 == 0) {
+            if (a.elems[streams_index] != "streams") {
+                reply = "-ERR syntax error\r\n";
+            } else {
+                // Parse streams and IDs
+                size_t num_streams = (a.elems.size() - streams_index - 1) / 2;
+                std::vector<std::pair<std::string, std::vector<StreamEntry>>> results;
                 
-                // Parse the start ID
-                long long start_millis, start_seq;
-                if (!parse_stream_id(start_id, start_millis, start_seq)) {
-                    reply = "-ERR Invalid stream ID specified in XREAD\r\n";
-                    has_error = true;
-                    break;
-                }
-                
-                auto stream_it = streams.find(stream_key);
-                if (stream_it != streams.end()) {
-                    const auto& stream = stream_it->second;
-                    std::vector<StreamEntry> matching_entries;
+                // Helper function to check for new entries
+                auto check_for_entries = [&]() -> bool {
+                    results.clear();
+                    bool has_error = false;
                     
-                    // Find all entries with ID > start_id (exclusive)
-                    for (const auto& entry : stream) {
-                        long long entry_millis, entry_seq;
-                        if (parse_stream_id(entry.id, entry_millis, entry_seq)) {
-                            if (is_id_greater_than(entry_millis, entry_seq, start_millis, start_seq)) {
-                                matching_entries.push_back(entry);
+                    for (size_t i = 0; i < num_streams && !has_error; ++i) {
+                        const std::string& stream_key = a.elems[streams_index + 1 + i];
+                        const std::string& start_id = a.elems[streams_index + 1 + num_streams + i];
+                        
+                        // Parse the start ID
+                        long long start_millis, start_seq;
+                        if (!parse_stream_id(start_id, start_millis, start_seq)) {
+                            reply = "-ERR Invalid stream ID specified in XREAD\r\n";
+                            has_error = true;
+                            break;
+                        }
+                        
+                        auto stream_it = streams.find(stream_key);
+                        if (stream_it != streams.end()) {
+                            const auto& stream = stream_it->second;
+                            std::vector<StreamEntry> matching_entries;
+                            
+                            // Find all entries with ID > start_id (exclusive)
+                            for (const auto& entry : stream) {
+                                long long entry_millis, entry_seq;
+                                if (parse_stream_id(entry.id, entry_millis, entry_seq)) {
+                                    if (is_id_greater_than(entry_millis, entry_seq, start_millis, start_seq)) {
+                                        matching_entries.push_back(entry);
+                                    }
+                                }
+                            }
+                            
+                            // Only add stream to results if it has matching entries
+                            if (!matching_entries.empty()) {
+                                results.push_back({stream_key, matching_entries});
                             }
                         }
                     }
                     
-                    // Only add stream to results if it has matching entries
-                    if (!matching_entries.empty()) {
-                        results.push_back({stream_key, matching_entries});
+                    return !has_error && !results.empty();
+                };
+                
+                // Check for immediate results
+                if (check_for_entries()) {
+                    reply = format_xread_response(results);
+                } else if (is_blocking && reply.empty()) {
+                    // Blocking mode - wait for new entries
+                    std::unique_lock<std::mutex> lock(server_state.mtx);
+                    
+                    if (timeout_ms == 0.0) {
+                        // Wait indefinitely
+                        while (reply.empty()) {
+                            // Wait for notification from any of the streams
+                            bool notified = false;
+                            for (size_t i = 0; i < num_streams; ++i) {
+                                const std::string& stream_key = a.elems[streams_index + 1 + i];
+                                auto& cond = server_state.waiting[stream_key];
+                                
+                                cond.wait(lock, [&]() { return check_for_entries(); });
+                                if (!results.empty()) {
+                                    notified = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (notified && !results.empty()) {
+                                reply = format_xread_response(results);
+                                break;
+                            }
+                        }
+                    } else {
+                        // Wait with timeout
+                        auto timeout_duration = std::chrono::duration<double, std::milli>(timeout_ms);
+                        auto end_time = std::chrono::steady_clock::now() + 
+                                       std::chrono::duration_cast<std::chrono::milliseconds>(timeout_duration);
+                        
+                        bool found_entries = false;
+                        for (size_t i = 0; i < num_streams && !found_entries; ++i) {
+                            const std::string& stream_key = a.elems[streams_index + 1 + i];
+                            auto& cond = server_state.waiting[stream_key];
+                            
+                            if (cond.wait_until(lock, end_time, [&]() { return check_for_entries(); })) {
+                                if (!results.empty()) {
+                                    found_entries = true;
+                                    reply = format_xread_response(results);
+                                }
+                            }
+                        }
+                        
+                        if (!found_entries) {
+                            reply = "$-1\r\n"; // Timeout - return null
+                        }
                     }
+                } else if (reply.empty()) {
+                    // Non-blocking mode with no results
+                    reply = format_xread_response(results); // Empty results
                 }
-                // If stream doesn't exist, we skip it (no entries to return)
             }
-            
-            if (!has_error) {
-                reply = format_xread_response(results);
-            }
+        } else {
+            reply = "-ERR wrong number of arguments for 'XREAD'\r\n";
         }
-    } else {
-        reply = "-ERR wrong number of arguments for 'XREAD'\r\n";
     }
 }
               
