@@ -18,12 +18,20 @@
 #include <chrono>
 #include <mutex>
 #include <condition_variable>
-
+#include <map>
 
 static std::unordered_map<std::string, std::string> store;
 static std::unordered_map<std::string, std::chrono::steady_clock::time_point> ttl;
 
 static std::unordered_map<std::string, std::vector<std::string>> lists; // lists
+
+struct StreamEntry {
+    std::string id;
+    std::map<std::string, std::string> fields;
+};
+
+std::unordered_map<std::string, std::vector<StreamEntry>> streams;
+
 
 // Add this after your existing globals
 struct ServerState {
@@ -267,7 +275,27 @@ std::string handle_request(const std::string& req, int client_fd) {
     } else {
         reply = "-ERR wrong number of arguments for 'rpush' command\r\n";
     }
+}else if (cmd == "XADD") {
+    if (a.elems.size() >= 5 && a.elems.size() % 2 == 1) {
+        const std::string& key = a.elems[1];
+        const std::string& id = a.elems[2];
+
+        std::map<std::string, std::string> fields;
+        for (size_t i = 3; i < a.elems.size(); i += 2) {
+            const std::string& field = a.elems[i];
+            const std::string& value = a.elems[i + 1];
+            fields[field] = value;
+        }
+
+        streams[key].push_back(StreamEntry{ id, fields });
+
+        reply = "$" + std::to_string(id.size()) + "\r\n" + id + "\r\n";
+    } else {
+        reply = "-ERR wrong number of arguments for 'XADD'\r\n";
+    }
 }
+
+
 
 
 
@@ -398,8 +426,8 @@ else if (cmd == "TYPE") {
 
         if (store.find(key) != store.end()) {
             reply = "+string\r\n";
-        } else if (lists.find(key) != lists.end()) {
-            reply = "+list\r\n";  // This can be removed for now if you're only supporting "string" and "none"
+        } else if (streams.find(key) != streams.end()) {
+            reply = "+stream\r\n";
         } else {
             reply = "+none\r\n";
         }
@@ -407,6 +435,7 @@ else if (cmd == "TYPE") {
         reply = "-ERR wrong number of arguments for 'TYPE'\r\n";
     }
 }
+
 else if (cmd == "LPOP") {
     if (a.elems.size() == 2) {
         // LPOP key - single element
