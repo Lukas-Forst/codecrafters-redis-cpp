@@ -19,6 +19,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <map>
+#include <climits>
 
 static std::unordered_map<std::string, std::string> store;
 static std::unordered_map<std::string, std::chrono::steady_clock::time_point> ttl;
@@ -106,6 +107,41 @@ static long long get_current_millis() {
     auto now = std::chrono::system_clock::now();
     auto duration = now.time_since_epoch();
     return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+}
+
+// Helper function to parse range ID (may be missing sequence number)
+static bool parse_range_id(const std::string& id_str, long long& millis, long long& seq, bool is_end_range = false) {
+    size_t dash_pos = id_str.find('-');
+    if (dash_pos == std::string::npos) {
+        // No sequence number provided
+        try {
+            size_t idx = 0;
+            millis = std::stoll(id_str, &idx, 10);
+            if (idx != id_str.size() || millis < 0) return false;
+            
+            // Default sequence: 0 for start, maximum for end
+            seq = is_end_range ? LLONG_MAX : 0;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    } else {
+        // Full ID with sequence number
+        return parse_stream_id(id_str, millis, seq);
+    }
+}
+
+// Helper function to check if an ID is within range (inclusive)
+static bool is_id_in_range(long long millis, long long seq, 
+                          long long start_millis, long long start_seq,
+                          long long end_millis, long long end_seq) {
+    // Check if ID >= start
+    bool gte_start = (millis > start_millis) || (millis == start_millis && seq >= start_seq);
+    
+    // Check if ID <= end
+    bool lte_end = (millis < end_millis) || (millis == end_millis && seq <= end_seq);
+    
+    return gte_start && lte_end;
 }
 
 // Helper function to find the next sequence number for a given millisecond timestamp
@@ -241,6 +277,30 @@ static inline std::string bulk_array(const std::vector<std::string>& vals) {
         out += "\r\n";
     }
     return out;
+}
+
+// Helper function to format XRANGE response
+static std::string format_xrange_response(const std::vector<StreamEntry>& entries) {
+    std::string response = "*" + std::to_string(entries.size()) + "\r\n";
+    
+    for (const auto& entry : entries) {
+        // Each entry is an array with 2 elements: [id, [field1, value1, field2, value2, ...]]
+        response += "*2\r\n";
+        
+        // First element: entry ID
+        response += "$" + std::to_string(entry.id.size()) + "\r\n" + entry.id + "\r\n";
+        
+        // Second element: array of field-value pairs
+        response += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
+        for (const auto& field_pair : entry.fields) {
+            // Field name
+            response += "$" + std::to_string(field_pair.first.size()) + "\r\n" + field_pair.first + "\r\n";
+            // Field value
+            response += "$" + std::to_string(field_pair.second.size()) + "\r\n" + field_pair.second + "\r\n";
+        }
+    }
+    
+    return response;
 }
 
 static bool parse_ll(const std::string& s, long long& out) {
@@ -707,6 +767,45 @@ else if (cmd == "BLPOP") {
     }
 }
 
+else if (cmd == "XRANGE") {
+    if (a.elems.size() == 4) {
+        const std::string& key = a.elems[1];
+        const std::string& start_id = a.elems[2];
+        const std::string& end_id = a.elems[3];
+        
+        // Parse start and end IDs
+        long long start_millis, start_seq, end_millis, end_seq;
+        if (!parse_range_id(start_id, start_millis, start_seq, false) ||
+            !parse_range_id(end_id, end_millis, end_seq, true)) {
+            reply = "-ERR Invalid stream ID specified in range\r\n";
+        } else {
+            auto stream_it = streams.find(key);
+            if (stream_it == streams.end()) {
+                // Stream doesn't exist, return empty array
+                reply = "*0\r\n";
+            } else {
+                const auto& stream = stream_it->second;
+                std::vector<StreamEntry> matching_entries;
+                
+                // Find all entries within the range
+                for (const auto& entry : stream) {
+                    long long entry_millis, entry_seq;
+                    if (parse_stream_id(entry.id, entry_millis, entry_seq)) {
+                        if (is_id_in_range(entry_millis, entry_seq, 
+                                          start_millis, start_seq, 
+                                          end_millis, end_seq)) {
+                            matching_entries.push_back(entry);
+                        }
+                    }
+                }
+                
+                reply = format_xrange_response(matching_entries);
+            }
+        }
+    } else {
+        reply = "-ERR wrong number of arguments for 'XRANGE'\r\n";
+    }
+}
               
         else {
             reply = "-ERR unknown command\r\n";
