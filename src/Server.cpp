@@ -109,8 +109,15 @@ static long long get_current_millis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
 }
 
-// Helper function to parse range ID (may be missing sequence number)
+// Helper function to parse range ID (may be missing sequence number or be -)
 static bool parse_range_id(const std::string& id_str, long long& millis, long long& seq, bool is_end_range = false) {
+    // Handle special case: "-" means start from the beginning
+    if (id_str == "-") {
+        millis = 0;
+        seq = 0;
+        return true;
+    }
+    
     size_t dash_pos = id_str.find('-');
     if (dash_pos == std::string::npos) {
         // No sequence number provided
