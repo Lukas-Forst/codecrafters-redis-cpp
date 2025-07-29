@@ -483,6 +483,46 @@ std::string handle_request(const std::string& req, int client_fd) {
                 reply = "-ERR wrong number of arguments for 'get' command\r\n";
             }
         }
+        else if (cmd == "INCR") {
+            if (a.elems.size() == 2) {
+                const std::string& key = a.elems[1];
+                
+                // Check for expiration first
+                if (is_expired_now(key)) {
+                    reply = "-ERR value is not an integer or out of range\r\n";
+                } else {
+                    auto it = store.find(key);
+                    if (it == store.end()) {
+                        // Key doesn't exist - will handle in later stages
+                        reply = "-ERR key does not exist\r\n";
+                    } else {
+                        const std::string& val = it->second;
+                        
+                        // Try to parse the value as an integer
+                        try {
+                            size_t idx = 0;
+                            long long num = std::stoll(val, &idx, 10);
+                            if (idx != val.size()) {
+                                // Not a valid integer
+                                reply = "-ERR value is not an integer or out of range\r\n";
+                            } else {
+                                // Increment the value
+                                num++;
+                                std::string new_val = std::to_string(num);
+                                store[key] = new_val;
+                                
+                                // Return as RESP integer
+                                reply = ":" + std::to_string(num) + "\r\n";
+                            }
+                        } catch (...) {
+                            reply = "-ERR value is not an integer or out of range\r\n";
+                        }
+                    }
+                }
+            } else {
+                reply = "-ERR wrong number of arguments for 'incr' command\r\n";
+            }
+        }
         else if (cmd == "RPUSH") {
     if (a.elems.size() >= 3) {
         const std::string& key = a.elems[1];
