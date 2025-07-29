@@ -55,11 +55,66 @@ static bool parse_stream_id(const std::string& id_str, long long& millis, long l
     }
 }
 
+// Helper function to parse stream entry ID with * support for sequence
+static bool parse_stream_id_with_wildcard(const std::string& id_str, long long& millis, long long& seq, bool& seq_is_wildcard) {
+    size_t dash_pos = id_str.find('-');
+    if (dash_pos == std::string::npos) return false;
+    
+    std::string millis_str = id_str.substr(0, dash_pos);
+    std::string seq_str = id_str.substr(dash_pos + 1);
+    
+    try {
+        size_t idx = 0;
+        millis = std::stoll(millis_str, &idx, 10);
+        if (idx != millis_str.size() || millis < 0) return false;
+        
+        if (seq_str == "*") {
+            seq_is_wildcard = true;
+            seq = -1; // placeholder
+            return true;
+        } else {
+            seq_is_wildcard = false;
+            idx = 0;
+            seq = std::stoll(seq_str, &idx, 10);
+            if (idx != seq_str.size() || seq < 0) return false;
+            return true;
+        }
+    } catch (...) {
+        return false;
+    }
+}
+
 // Helper function to compare stream entry IDs
 static bool is_id_greater(long long millis1, long long seq1, long long millis2, long long seq2) {
     if (millis1 > millis2) return true;
     if (millis1 < millis2) return false;
     return seq1 > seq2;
+}
+
+// Helper function to find the next sequence number for a given millisecond timestamp
+static long long find_next_sequence(const std::vector<StreamEntry>& stream, long long millis) {
+    // Special case: if millis is 0, start with sequence 1
+    if (millis == 0) {
+        // Find the highest sequence number for millis = 0
+        long long max_seq = 0;
+        for (const auto& entry : stream) {
+            long long entry_millis, entry_seq;
+            if (parse_stream_id(entry.id, entry_millis, entry_seq) && entry_millis == 0) {
+                max_seq = std::max(max_seq, entry_seq);
+            }
+        }
+        return max_seq + 1;
+    }
+    
+    // For other millisecond values, find the highest sequence number for that timestamp
+    long long max_seq = -1;
+    for (const auto& entry : stream) {
+        long long entry_millis, entry_seq;
+        if (parse_stream_id(entry.id, entry_millis, entry_seq) && entry_millis == millis) {
+            max_seq = std::max(max_seq, entry_seq);
+        }
+    }
+    return max_seq + 1;
 }
 
 
@@ -308,32 +363,51 @@ std::string handle_request(const std::string& req, int client_fd) {
 }else if (cmd == "XADD") {
     if (a.elems.size() >= 5 && a.elems.size() % 2 == 1) {
         const std::string& key = a.elems[1];
-        const std::string& id = a.elems[2];
+        const std::string& id_input = a.elems[2];
 
-        // Parse the provided ID
+        // Parse the provided ID (may contain wildcards)
         long long millis, seq;
-        if (!parse_stream_id(id, millis, seq)) {
+        bool seq_is_wildcard;
+        if (!parse_stream_id_with_wildcard(id_input, millis, seq, seq_is_wildcard)) {
             reply = "-ERR Invalid stream ID specified as stream command argument\r\n";
-        } else if (millis == 0 && seq == 0) {
-            reply = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
         } else {
-            // Check if ID is greater than the last entry in the stream
             auto& stream = streams[key];
-            bool valid_id = true;
+            std::string final_id;
             
-            if (!stream.empty()) {
-                const std::string& last_id = stream.back().id;
-                long long last_millis, last_seq;
-                if (parse_stream_id(last_id, last_millis, last_seq)) {
-                    if (!is_id_greater(millis, seq, last_millis, last_seq)) {
-                        valid_id = false;
+            if (seq_is_wildcard) {
+                // Auto-generate sequence number
+                long long generated_seq = find_next_sequence(stream, millis);
+                final_id = std::to_string(millis) + "-" + std::to_string(generated_seq);
+                seq = generated_seq;
+            } else {
+                // Use explicit ID
+                final_id = id_input;
+                
+                // Validate explicit ID
+                if (millis == 0 && seq == 0) {
+                    reply = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+                } else {
+                    // Check if ID is greater than the last entry in the stream
+                    bool valid_id = true;
+                    
+                    if (!stream.empty()) {
+                        const std::string& last_id = stream.back().id;
+                        long long last_millis, last_seq;
+                        if (parse_stream_id(last_id, last_millis, last_seq)) {
+                            if (!is_id_greater(millis, seq, last_millis, last_seq)) {
+                                valid_id = false;
+                            }
+                        }
+                    }
+                    
+                    if (!valid_id) {
+                        reply = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
                     }
                 }
             }
             
-            if (!valid_id) {
-                reply = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-            } else {
+            // If we haven't set an error reply, proceed with adding the entry
+            if (reply.empty()) {
                 std::map<std::string, std::string> fields;
                 for (size_t i = 3; i < a.elems.size(); i += 2) {
                     const std::string& field = a.elems[i];
@@ -341,8 +415,8 @@ std::string handle_request(const std::string& req, int client_fd) {
                     fields[field] = value;
                 }
 
-                stream.push_back(StreamEntry{ id, fields });
-                reply = "$" + std::to_string(id.size()) + "\r\n" + id + "\r\n";
+                stream.push_back(StreamEntry{ final_id, fields });
+                reply = "$" + std::to_string(final_id.size()) + "\r\n" + final_id + "\r\n";
             }
         }
     } else {
