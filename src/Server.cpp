@@ -16,10 +16,23 @@
 // ------------- utilities -----------------
 #include <unordered_map>  // add this
 #include <chrono>
+#include <mutex>
+#include <condition_variable>
+
+
 static std::unordered_map<std::string, std::string> store;
 static std::unordered_map<std::string, std::chrono::steady_clock::time_point> ttl;
 
 static std::unordered_map<std::string, std::vector<std::string>> lists; // lists
+
+// Add this after your existing globals
+struct ServerState {
+    std::mutex mtx;
+    std::unordered_map<std::string, std::condition_variable> waiting;
+    // Note: we'll keep using your existing `lists` map instead of adding another kv map
+};
+
+static ServerState server_state;
 
 static bool send_all(int fd, const void* buf, size_t len) {
     const char* p = static_cast<const char*>(buf);
@@ -141,7 +154,8 @@ bool parse_resp_array_of_bulk_strings(const std::string& s, RespArray& arr) {
 
 // ------------- request handling -----------------
 
-std::string handle_request(const std::string& req) {
+// Update to pass client_fd (same as my previous suggestion)
+std::string handle_request(const std::string& req, int client_fd) {
     RespArray a;
     std::string reply;
 
@@ -224,24 +238,26 @@ std::string handle_request(const std::string& req) {
     if (a.elems.size() >= 3) {
         const std::string& key = a.elems[1];
 
-        // Type check: if the key exists as a string, it's a WRONGTYPE error.
         if (store.find(key) != store.end()) {
             reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
         } else {
-            // Append all provided elements (supports RPUSH key e1 e2 e3 ...)
-            auto& vec = lists[key]; // creates list if not present
-            vec.reserve(vec.size() + (a.elems.size() - 2)); // tiny perf nicety
-            for (std::size_t i = 2; i < a.elems.size(); ++i) {
-                vec.push_back(a.elems[i]);
+            {
+                std::lock_guard<std::mutex> lock(server_state.mtx);
+                auto& vec = lists[key];
+                vec.reserve(vec.size() + (a.elems.size() - 2));
+                for (std::size_t i = 2; i < a.elems.size(); ++i) {
+                    vec.push_back(a.elems[i]);
+                }
+                reply = ":" + std::to_string(vec.size()) + "\r\n";
             }
-            reply = ":" + std::to_string(vec.size()) + "\r\n"; // RESP Integer
+            
+            // Notify any clients waiting on this list (outside the lock)
+            server_state.waiting[key].notify_one(); // or notify_all() if multiple clients should be woken
         }
-    }
-    
-    else {
+    } else {
         reply = "-ERR wrong number of arguments for 'rpush' command\r\n";
     }
-        }
+}
 
 
 
@@ -330,26 +346,28 @@ std::string handle_request(const std::string& req) {
             } else {
                 reply = "-ERR wrong number of arguments for 'lindex' command\r\n";
             }
-        } else if (cmd == "LPUSH"){
-            if (a.elems.size() >= 3) {
-            const std::string& key = a.elems[1];
+        } else if (cmd == "LPUSH") {
+    if (a.elems.size() >= 3) {
+        const std::string& key = a.elems[1];
 
-        // Type check: if the key exists as a string, it's a WRONGTYPE error.
-            if (store.find(key) != store.end()) {
-                reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
-            } else {
-            // Preppend all provided elements (supports RPUSH key e1 e2 e3 ...)
-            auto& vec = lists[key]; // creates list if not present
-            vec.reserve(vec.size() + (a.elems.size() - 2)); // tiny perf nicety
-            for (std::size_t i = 2; i < a.elems.size(); ++i) {
-                vec.insert(vec.begin(), a.elems[i]);
-                
+        if (store.find(key) != store.end()) {
+            reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        } else {
+            {
+                std::lock_guard<std::mutex> lock(server_state.mtx);
+                auto& vec = lists[key];
+                vec.reserve(vec.size() + (a.elems.size() - 2));
+                for (std::size_t i = 2; i < a.elems.size(); ++i) {
+                    vec.insert(vec.begin(), a.elems[i]);
+                }
+                reply = ":" + std::to_string(vec.size()) + "\r\n";
             }
-            reply = ":" + std::to_string(vec.size()) + "\r\n"; // RESP Integer
-            }
-            }
-
-        } else if (cmd == "LLEN"){
+            
+            // Notify waiting clients
+            server_state.waiting[key].notify_one();
+        }
+    }
+} else if (cmd == "LLEN"){
             if (a.elems.size() == 2) {
             const std::string& key = a.elems[1];
 
@@ -407,6 +425,75 @@ std::string handle_request(const std::string& req) {
         }
     }
 }
+else if (cmd == "BLPOP") {
+    if (a.elems.size() != 3) {
+        reply = "-ERR wrong number of arguments for 'blpop' command\r\n";
+    } else {
+        const std::string& list_key = a.elems[1];
+        
+        long long timeout_seconds = 0;
+        if (!parse_ll(a.elems[2], timeout_seconds) || timeout_seconds < 0) {
+            reply = "-ERR timeout is not a float or out of range\r\n";
+        } else if (store.find(list_key) != store.end()) {
+            reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        } else {
+            std::unique_lock<std::mutex> lock(server_state.mtx);
+            
+            // Check if list exists and has elements
+            auto list_it = lists.find(list_key);
+            if (list_it != lists.end() && !list_it->second.empty()) {
+                // Immediate pop
+                auto& list = list_it->second;
+                std::string val = std::move(list.front());
+                list.erase(list.begin());
+                
+                // Clean up empty list
+                if (list.empty()) {
+                    lists.erase(list_it);
+                }
+                
+                // Format: array with [key, value]
+                reply = "*2\r\n$" + std::to_string(list_key.size()) + "\r\n" + list_key + 
+                       "\r\n$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+            } else {
+                // Blocking mode
+                auto& cond = server_state.waiting[list_key];
+                
+                if (timeout_seconds == 0) {
+                    // Wait indefinitely
+                    cond.wait(lock, [&]() { 
+                        auto it = lists.find(list_key);
+                        return it != lists.end() && !it->second.empty();
+                    });
+                } else {
+                    // Wait with timeout
+                    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
+                    cond.wait_until(lock, end, [&]() { 
+                        auto it = lists.find(list_key);
+                        return it != lists.end() && !it->second.empty();
+                    });
+                }
+                
+                // Check if we got an element or timed out
+                auto final_it = lists.find(list_key);
+                if (final_it != lists.end() && !final_it->second.empty()) {
+                    auto& list = final_it->second;
+                    std::string val = std::move(list.front());
+                    list.erase(list.begin());
+                    
+                    if (list.empty()) {
+                        lists.erase(final_it);
+                    }
+                    
+                    reply = "*2\r\n$" + std::to_string(list_key.size()) + "\r\n" + list_key + 
+                           "\r\n$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                } else {
+                    reply = "$-1\r\n"; // Timeout occurred
+                }
+            }
+        }
+    }
+}
 
               
         else {
@@ -440,7 +527,7 @@ void handle_client(int client_fd) {
         }
 
         std::string req(buf, buf + n);
-        std::string reply = handle_request(req);
+        std::string reply = handle_request(req, client_fd);  // Add client_fd parameter
 
         if (!send_all(client_fd, reply.data(), reply.size())) {
             break; // client closed while we were sending
