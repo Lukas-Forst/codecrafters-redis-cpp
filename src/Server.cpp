@@ -377,7 +377,7 @@ std::string handle_request(const std::string& req, int client_fd) {
             server_state.waiting[key].notify_one();
         }
     }
-} else if (cmd == "LLEN"){
+}else if (cmd == "LLEN"){
             if (a.elems.size() == 2) {
             const std::string& key = a.elems[1];
 
@@ -389,7 +389,25 @@ std::string handle_request(const std::string& req, int client_fd) {
                 reply = ":"+ std::to_string(vec.size()) +"\r\n";
                 
         }
-    }}else if (cmd == "LPOP") {
+    }
+} 
+
+else if (cmd == "TYPE") {
+    if (a.elems.size() == 2) {
+        const std::string& key = a.elems[1];
+
+        if (store.find(key) != store.end()) {
+            reply = "+string\r\n";
+        } else if (lists.find(key) != lists.end()) {
+            reply = "+list\r\n";  // This can be removed for now if you're only supporting "string" and "none"
+        } else {
+            reply = "+none\r\n";
+        }
+    } else {
+        reply = "-ERR wrong number of arguments for 'TYPE'\r\n";
+    }
+}
+else if (cmd == "LPOP") {
     if (a.elems.size() == 2) {
         // LPOP key - single element
         const std::string& key = a.elems[1];
