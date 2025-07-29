@@ -165,6 +165,17 @@ static bool is_id_greater_than(long long millis, long long seq, long long ref_mi
     return seq > ref_seq;
 }
 
+// Helper function to get the last entry ID in a stream (for $ handling)
+static bool get_last_entry_id(const std::vector<StreamEntry>& stream, long long& millis, long long& seq) {
+    if (stream.empty()) {
+        return false;
+    }
+    
+    // Return the ID of the last entry
+    const std::string& last_id = stream.back().id;
+    return parse_stream_id(last_id, millis, seq);
+}
+
 // Helper function to find the next sequence number for a given millisecond timestamp
 static long long find_next_sequence(const std::vector<StreamEntry>& stream, long long millis) {
     // Special case: if millis is 0, start with sequence 1
@@ -890,51 +901,76 @@ else if (cmd == "XREAD") {
             if (a.elems[streams_index] != "streams") {
                 reply = "-ERR syntax error\r\n";
             } else {
-                // Parse streams and IDs
+                // Parse streams and IDs, resolving $ once at the beginning
                 size_t num_streams = (a.elems.size() - streams_index - 1) / 2;
                 std::vector<std::pair<std::string, std::vector<StreamEntry>>> results;
                 
-                // Helper function to check for new entries
-                auto check_for_entries = [&]() -> bool {
-                    results.clear();
-                    bool has_error = false;
+                // Pre-resolve all start IDs (including $ conversion)
+                std::vector<std::pair<std::string, std::pair<long long, long long>>> resolved_streams;
+                bool has_parse_error = false;
+                
+                for (size_t i = 0; i < num_streams && !has_parse_error; ++i) {
+                    const std::string& stream_key = a.elems[streams_index + 1 + i];
+                    const std::string& start_id = a.elems[streams_index + 1 + num_streams + i];
                     
-                    for (size_t i = 0; i < num_streams && !has_error; ++i) {
-                        const std::string& stream_key = a.elems[streams_index + 1 + i];
-                        const std::string& start_id = a.elems[streams_index + 1 + num_streams + i];
-                        
-                        // Parse the start ID
-                        long long start_millis, start_seq;
-                        if (!parse_stream_id(start_id, start_millis, start_seq)) {
-                            reply = "-ERR Invalid stream ID specified in XREAD\r\n";
-                            has_error = true;
-                            break;
-                        }
-                        
+                    long long start_millis, start_seq;
+                    if (start_id == "$") {
+                        // $ means start from the last entry in the stream at command time
                         auto stream_it = streams.find(stream_key);
-                        if (stream_it != streams.end()) {
-                            const auto& stream = stream_it->second;
-                            std::vector<StreamEntry> matching_entries;
-                            
-                            // Find all entries with ID > start_id (exclusive)
-                            for (const auto& entry : stream) {
-                                long long entry_millis, entry_seq;
-                                if (parse_stream_id(entry.id, entry_millis, entry_seq)) {
-                                    if (is_id_greater_than(entry_millis, entry_seq, start_millis, start_seq)) {
-                                        matching_entries.push_back(entry);
-                                    }
-                                }
+                        if (stream_it != streams.end() && !stream_it->second.empty()) {
+                            if (!get_last_entry_id(stream_it->second, start_millis, start_seq)) {
+                                reply = "-ERR Invalid stream ID specified in XREAD\r\n";
+                                has_parse_error = true;
+                                break;
                             }
-                            
-                            // Only add stream to results if it has matching entries
-                            if (!matching_entries.empty()) {
-                                results.push_back({stream_key, matching_entries});
-                            }
+                        } else {
+                            // Stream doesn't exist or is empty, use 0-0 as starting point
+                            start_millis = 0;
+                            start_seq = 0;
                         }
+                    } else if (!parse_stream_id(start_id, start_millis, start_seq)) {
+                        reply = "-ERR Invalid stream ID specified in XREAD\r\n";
+                        has_parse_error = true;
+                        break;
                     }
                     
-                    return !has_error && !results.empty();
-                };
+                    resolved_streams.push_back({stream_key, {start_millis, start_seq}});
+                }
+                
+                if (!has_parse_error) {
+                    // Helper function to check for new entries using resolved IDs
+                    auto check_for_entries = [&]() -> bool {
+                        results.clear();
+                        
+                        for (const auto& resolved : resolved_streams) {
+                            const std::string& stream_key = resolved.first;
+                            long long start_millis = resolved.second.first;
+                            long long start_seq = resolved.second.second;
+                        
+                            auto stream_it = streams.find(stream_key);
+                            if (stream_it != streams.end()) {
+                                const auto& stream = stream_it->second;
+                                std::vector<StreamEntry> matching_entries;
+                                
+                                // Find all entries with ID > start_id (exclusive)
+                                for (const auto& entry : stream) {
+                                    long long entry_millis, entry_seq;
+                                    if (parse_stream_id(entry.id, entry_millis, entry_seq)) {
+                                        if (is_id_greater_than(entry_millis, entry_seq, start_millis, start_seq)) {
+                                            matching_entries.push_back(entry);
+                                        }
+                                    }
+                                }
+                                
+                                // Only add stream to results if it has matching entries
+                                if (!matching_entries.empty()) {
+                                    results.push_back({stream_key, matching_entries});
+                                }
+                            }
+                        }
+                        
+                        return !results.empty();
+                    };
                 
                 // Check for immediate results
                 if (check_for_entries()) {
@@ -944,26 +980,16 @@ else if (cmd == "XREAD") {
                     std::unique_lock<std::mutex> lock(server_state.mtx);
                     
                     if (timeout_ms == 0.0) {
-                        // Wait indefinitely
-                        while (reply.empty()) {
-                            // Wait for notification from any of the streams
-                            bool notified = false;
-                            for (size_t i = 0; i < num_streams; ++i) {
-                                const std::string& stream_key = a.elems[streams_index + 1 + i];
-                                auto& cond = server_state.waiting[stream_key];
-                                
-                                cond.wait(lock, [&]() { return check_for_entries(); });
-                                if (!results.empty()) {
-                                    notified = true;
-                                    break;
-                                }
-                            }
-                            
-                            if (notified && !results.empty()) {
-                                reply = format_xread_response(results);
-                                break;
-                            }
-                        }
+                        // Wait indefinitely - wait on the first stream (for simplicity)
+                        const std::string& first_stream_key = a.elems[streams_index + 1];
+                        auto& cond = server_state.waiting[first_stream_key];
+                        
+                        cond.wait(lock, [&]() { 
+                            return check_for_entries(); 
+                        });
+                        
+                        // After waking up, format the response
+                        reply = format_xread_response(results);
                     } else {
                         // Wait with timeout
                         auto timeout_duration = std::chrono::duration<double, std::milli>(timeout_ms);
@@ -990,6 +1016,7 @@ else if (cmd == "XREAD") {
                 } else if (reply.empty()) {
                     // Non-blocking mode with no results
                     reply = format_xread_response(results); // Empty results
+                }
                 }
             }
         } else {
