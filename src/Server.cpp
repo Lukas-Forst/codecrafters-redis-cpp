@@ -109,12 +109,19 @@ static long long get_current_millis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
 }
 
-// Helper function to parse range ID (may be missing sequence number or be -)
+// Helper function to parse range ID (may be missing sequence number, be -, or be +)
 static bool parse_range_id(const std::string& id_str, long long& millis, long long& seq, bool is_end_range = false) {
     // Handle special case: "-" means start from the beginning
     if (id_str == "-") {
         millis = 0;
         seq = 0;
+        return true;
+    }
+    
+    // Handle special case: "+" means end at the maximum possible ID
+    if (id_str == "+") {
+        millis = LLONG_MAX;
+        seq = LLONG_MAX;
         return true;
     }
     
