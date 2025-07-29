@@ -158,6 +158,13 @@ static bool is_id_in_range(long long millis, long long seq,
     return gte_start && lte_end;
 }
 
+// Helper function to check if an ID is greater than another (exclusive comparison for XREAD)
+static bool is_id_greater_than(long long millis, long long seq, long long ref_millis, long long ref_seq) {
+    if (millis > ref_millis) return true;
+    if (millis < ref_millis) return false;
+    return seq > ref_seq;
+}
+
 // Helper function to find the next sequence number for a given millisecond timestamp
 static long long find_next_sequence(const std::vector<StreamEntry>& stream, long long millis) {
     // Special case: if millis is 0, start with sequence 1
@@ -311,6 +318,43 @@ static std::string format_xrange_response(const std::vector<StreamEntry>& entrie
             response += "$" + std::to_string(field_pair.first.size()) + "\r\n" + field_pair.first + "\r\n";
             // Field value
             response += "$" + std::to_string(field_pair.second.size()) + "\r\n" + field_pair.second + "\r\n";
+        }
+    }
+    
+    return response;
+}
+
+// Helper function to format XREAD response
+static std::string format_xread_response(const std::vector<std::pair<std::string, std::vector<StreamEntry>>>& stream_results) {
+    std::string response = "*" + std::to_string(stream_results.size()) + "\r\n";
+    
+    for (const auto& stream_result : stream_results) {
+        const std::string& stream_key = stream_result.first;
+        const std::vector<StreamEntry>& entries = stream_result.second;
+        
+        // Each stream result is an array with 2 elements: [stream_key, [entries...]]
+        response += "*2\r\n";
+        
+        // First element: stream key
+        response += "$" + std::to_string(stream_key.size()) + "\r\n" + stream_key + "\r\n";
+        
+        // Second element: array of entries
+        response += "*" + std::to_string(entries.size()) + "\r\n";
+        for (const auto& entry : entries) {
+            // Each entry is an array with 2 elements: [id, [field1, value1, field2, value2, ...]]
+            response += "*2\r\n";
+            
+            // Entry ID
+            response += "$" + std::to_string(entry.id.size()) + "\r\n" + entry.id + "\r\n";
+            
+            // Entry fields
+            response += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
+            for (const auto& field_pair : entry.fields) {
+                // Field name
+                response += "$" + std::to_string(field_pair.first.size()) + "\r\n" + field_pair.first + "\r\n";
+                // Field value
+                response += "$" + std::to_string(field_pair.second.size()) + "\r\n" + field_pair.second + "\r\n";
+            }
         }
     }
     
@@ -818,6 +862,62 @@ else if (cmd == "XRANGE") {
         }
     } else {
         reply = "-ERR wrong number of arguments for 'XRANGE'\r\n";
+    }
+}
+
+else if (cmd == "XREAD") {
+    // XREAD streams stream_key1 stream_key2 ... id1 id2 ...
+    // Minimum: XREAD streams stream_key id (4 elements total)
+    if (a.elems.size() >= 4 && a.elems.size() % 2 == 0) {
+        if (a.elems[1] != "streams") {
+            reply = "-ERR syntax error\r\n";
+        } else {
+            // Parse streams and IDs
+            size_t num_streams = (a.elems.size() - 2) / 2;
+            std::vector<std::pair<std::string, std::vector<StreamEntry>>> results;
+            
+            bool has_error = false;
+            for (size_t i = 0; i < num_streams && !has_error; ++i) {
+                const std::string& stream_key = a.elems[2 + i];
+                const std::string& start_id = a.elems[2 + num_streams + i];
+                
+                // Parse the start ID
+                long long start_millis, start_seq;
+                if (!parse_stream_id(start_id, start_millis, start_seq)) {
+                    reply = "-ERR Invalid stream ID specified in XREAD\r\n";
+                    has_error = true;
+                    break;
+                }
+                
+                auto stream_it = streams.find(stream_key);
+                if (stream_it != streams.end()) {
+                    const auto& stream = stream_it->second;
+                    std::vector<StreamEntry> matching_entries;
+                    
+                    // Find all entries with ID > start_id (exclusive)
+                    for (const auto& entry : stream) {
+                        long long entry_millis, entry_seq;
+                        if (parse_stream_id(entry.id, entry_millis, entry_seq)) {
+                            if (is_id_greater_than(entry_millis, entry_seq, start_millis, start_seq)) {
+                                matching_entries.push_back(entry);
+                            }
+                        }
+                    }
+                    
+                    // Only add stream to results if it has matching entries
+                    if (!matching_entries.empty()) {
+                        results.push_back({stream_key, matching_entries});
+                    }
+                }
+                // If stream doesn't exist, we skip it (no entries to return)
+            }
+            
+            if (!has_error) {
+                reply = format_xread_response(results);
+            }
+        }
+    } else {
+        reply = "-ERR wrong number of arguments for 'XREAD'\r\n";
     }
 }
               
