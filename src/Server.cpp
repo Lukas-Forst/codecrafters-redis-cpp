@@ -32,6 +32,36 @@ struct StreamEntry {
 
 std::unordered_map<std::string, std::vector<StreamEntry>> streams;
 
+// Helper function to parse stream entry ID
+static bool parse_stream_id(const std::string& id_str, long long& millis, long long& seq) {
+    size_t dash_pos = id_str.find('-');
+    if (dash_pos == std::string::npos) return false;
+    
+    std::string millis_str = id_str.substr(0, dash_pos);
+    std::string seq_str = id_str.substr(dash_pos + 1);
+    
+    try {
+        size_t idx = 0;
+        millis = std::stoll(millis_str, &idx, 10);
+        if (idx != millis_str.size() || millis < 0) return false;
+        
+        idx = 0;
+        seq = std::stoll(seq_str, &idx, 10);
+        if (idx != seq_str.size() || seq < 0) return false;
+        
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Helper function to compare stream entry IDs
+static bool is_id_greater(long long millis1, long long seq1, long long millis2, long long seq2) {
+    if (millis1 > millis2) return true;
+    if (millis1 < millis2) return false;
+    return seq1 > seq2;
+}
+
 
 // Add this after your existing globals
 struct ServerState {
@@ -280,16 +310,41 @@ std::string handle_request(const std::string& req, int client_fd) {
         const std::string& key = a.elems[1];
         const std::string& id = a.elems[2];
 
-        std::map<std::string, std::string> fields;
-        for (size_t i = 3; i < a.elems.size(); i += 2) {
-            const std::string& field = a.elems[i];
-            const std::string& value = a.elems[i + 1];
-            fields[field] = value;
+        // Parse the provided ID
+        long long millis, seq;
+        if (!parse_stream_id(id, millis, seq)) {
+            reply = "-ERR Invalid stream ID specified as stream command argument\r\n";
+        } else if (millis == 0 && seq == 0) {
+            reply = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+        } else {
+            // Check if ID is greater than the last entry in the stream
+            auto& stream = streams[key];
+            bool valid_id = true;
+            
+            if (!stream.empty()) {
+                const std::string& last_id = stream.back().id;
+                long long last_millis, last_seq;
+                if (parse_stream_id(last_id, last_millis, last_seq)) {
+                    if (!is_id_greater(millis, seq, last_millis, last_seq)) {
+                        valid_id = false;
+                    }
+                }
+            }
+            
+            if (!valid_id) {
+                reply = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+            } else {
+                std::map<std::string, std::string> fields;
+                for (size_t i = 3; i < a.elems.size(); i += 2) {
+                    const std::string& field = a.elems[i];
+                    const std::string& value = a.elems[i + 1];
+                    fields[field] = value;
+                }
+
+                stream.push_back(StreamEntry{ id, fields });
+                reply = "$" + std::to_string(id.size()) + "\r\n" + id + "\r\n";
+            }
         }
-
-        streams[key].push_back(StreamEntry{ id, fields });
-
-        reply = "$" + std::to_string(id.size()) + "\r\n" + id + "\r\n";
     } else {
         reply = "-ERR wrong number of arguments for 'XADD'\r\n";
     }
