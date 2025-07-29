@@ -55,8 +55,18 @@ static bool parse_stream_id(const std::string& id_str, long long& millis, long l
     }
 }
 
-// Helper function to parse stream entry ID with * support for sequence
-static bool parse_stream_id_with_wildcard(const std::string& id_str, long long& millis, long long& seq, bool& seq_is_wildcard) {
+// Helper function to parse stream entry ID with * support for sequence and full ID
+static bool parse_stream_id_with_wildcard(const std::string& id_str, long long& millis, long long& seq, bool& seq_is_wildcard, bool& full_wildcard) {
+    // Check if entire ID is *
+    if (id_str == "*") {
+        full_wildcard = true;
+        seq_is_wildcard = false;
+        millis = -1; // placeholder
+        seq = -1; // placeholder
+        return true;
+    }
+    
+    full_wildcard = false;
     size_t dash_pos = id_str.find('-');
     if (dash_pos == std::string::npos) return false;
     
@@ -89,6 +99,13 @@ static bool is_id_greater(long long millis1, long long seq1, long long millis2, 
     if (millis1 > millis2) return true;
     if (millis1 < millis2) return false;
     return seq1 > seq2;
+}
+
+// Helper function to get current Unix timestamp in milliseconds
+static long long get_current_millis() {
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
 }
 
 // Helper function to find the next sequence number for a given millisecond timestamp
@@ -367,15 +384,21 @@ std::string handle_request(const std::string& req, int client_fd) {
 
         // Parse the provided ID (may contain wildcards)
         long long millis, seq;
-        bool seq_is_wildcard;
-        if (!parse_stream_id_with_wildcard(id_input, millis, seq, seq_is_wildcard)) {
+        bool seq_is_wildcard, full_wildcard;
+        if (!parse_stream_id_with_wildcard(id_input, millis, seq, seq_is_wildcard, full_wildcard)) {
             reply = "-ERR Invalid stream ID specified as stream command argument\r\n";
         } else {
             auto& stream = streams[key];
             std::string final_id;
             
-            if (seq_is_wildcard) {
-                // Auto-generate sequence number
+            if (full_wildcard) {
+                // Auto-generate both timestamp and sequence number
+                millis = get_current_millis();
+                long long generated_seq = find_next_sequence(stream, millis);
+                final_id = std::to_string(millis) + "-" + std::to_string(generated_seq);
+                seq = generated_seq;
+            } else if (seq_is_wildcard) {
+                // Auto-generate sequence number only
                 long long generated_seq = find_next_sequence(stream, millis);
                 final_id = std::to_string(millis) + "-" + std::to_string(generated_seq);
                 seq = generated_seq;
