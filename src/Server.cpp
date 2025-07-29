@@ -32,6 +32,16 @@ struct ServerState {
     // Note: we'll keep using your existing `lists` map instead of adding another kv map
 };
 
+static bool parse_timeout(const std::string& s, double& out) {
+    try {
+        size_t idx = 0;
+        out = std::stod(s, &idx);
+        return idx == s.size() && out >= 0.0;
+    } catch (...) {
+        return false;
+    }
+}
+
 static ServerState server_state;
 
 static bool send_all(int fd, const void* buf, size_t len) {
@@ -431,8 +441,8 @@ else if (cmd == "BLPOP") {
     } else {
         const std::string& list_key = a.elems[1];
         
-        long long timeout_seconds = 0;
-        if (!parse_ll(a.elems[2], timeout_seconds) || timeout_seconds < 0) {
+        double timeout_seconds = 0.0;
+        if (!parse_timeout(a.elems[2], timeout_seconds)) {
             reply = "-ERR timeout is not a float or out of range\r\n";
         } else if (store.find(list_key) != store.end()) {
             reply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
@@ -459,15 +469,18 @@ else if (cmd == "BLPOP") {
                 // Blocking mode
                 auto& cond = server_state.waiting[list_key];
                 
-                if (timeout_seconds == 0) {
+                if (timeout_seconds == 0.0) {
                     // Wait indefinitely
                     cond.wait(lock, [&]() { 
                         auto it = lists.find(list_key);
                         return it != lists.end() && !it->second.empty();
                     });
                 } else {
-                    // Wait with timeout
-                    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
+                    // Wait with timeout - convert to milliseconds for precision
+                    auto timeout_ms = std::chrono::duration<double, std::milli>(timeout_seconds * 1000.0);
+                    auto end = std::chrono::steady_clock::now() + 
+                              std::chrono::duration_cast<std::chrono::milliseconds>(timeout_ms);
+                    
                     cond.wait_until(lock, end, [&]() { 
                         auto it = lists.find(list_key);
                         return it != lists.end() && !it->second.empty();
