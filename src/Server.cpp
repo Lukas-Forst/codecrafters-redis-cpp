@@ -1065,6 +1065,14 @@ else if (cmd == "XREAD") {
         }
     }
 }
+
+        else if (cmd == "MULTI") {
+            if (a.elems.size() == 1) {
+                reply = "+OK\r\n";
+            } else {
+                reply = "-ERR wrong number of arguments for 'multi' command\r\n";
+            }
+        }
               
         else {
             reply = "-ERR unknown command\r\n";
