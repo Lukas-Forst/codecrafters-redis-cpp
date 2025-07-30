@@ -26,6 +26,9 @@ static std::unordered_map<std::string, std::chrono::steady_clock::time_point> tt
 
 static std::unordered_map<std::string, std::vector<std::string>> lists; // lists
 
+// Transaction state per client
+static std::unordered_map<int, bool> client_in_transaction;
+
 struct StreamEntry {
     std::string id;
     std::map<std::string, std::string> fields;
@@ -1068,6 +1071,7 @@ else if (cmd == "XREAD") {
 
         else if (cmd == "MULTI") {
             if (a.elems.size() == 1) {
+                client_in_transaction[client_fd] = true;
                 reply = "+OK\r\n";
             } else {
                 reply = "-ERR wrong number of arguments for 'multi' command\r\n";
@@ -1076,7 +1080,13 @@ else if (cmd == "XREAD") {
         
         else if (cmd == "EXEC") {
             if (a.elems.size() == 1) {
-                reply = "-ERR EXEC without MULTI\r\n";
+                if (client_in_transaction[client_fd]) {
+                    // Empty transaction - return empty array
+                    client_in_transaction[client_fd] = false;
+                    reply = "*0\r\n";
+                } else {
+                    reply = "-ERR EXEC without MULTI\r\n";
+                }
             } else {
                 reply = "-ERR wrong number of arguments for 'exec' command\r\n";
             }
@@ -1119,6 +1129,9 @@ void handle_client(int client_fd) {
             break; // client closed while we were sending
         }
     }
+    
+    // Clean up client transaction state when client disconnects
+    client_in_transaction.erase(client_fd);
 }
 
 
