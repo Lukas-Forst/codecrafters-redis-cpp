@@ -493,8 +493,9 @@ std::string handle_request(const std::string& req, int client_fd) {
                 } else {
                     auto it = store.find(key);
                     if (it == store.end()) {
-                        // Key doesn't exist - will handle in later stages
-                        reply = "-ERR key does not exist\r\n";
+                        // Key doesn't exist - set it to 1
+                        store[key] = "1";
+                        reply = ":1\r\n";
                     } else {
                         const std::string& val = it->second;
                         
