@@ -529,7 +529,7 @@ std::string handle_request(const std::string& req, int client_fd) {
         to_upper(cmd);
 
         // Check if client is in transaction and command should be queued
-        if (client_in_transaction[client_fd] && cmd != "MULTI" && cmd != "EXEC") {
+        if (client_in_transaction[client_fd] && cmd != "MULTI" && cmd != "EXEC" && cmd != "DISCARD") {
             // Queue the command
             client_command_queue[client_fd].push_back(a);
             reply = "+QUEUED\r\n";
@@ -1222,6 +1222,21 @@ else if (cmd == "XREAD") {
                 }
             } else {
                 reply = "-ERR wrong number of arguments for 'exec' command\r\n";
+            }
+        }
+        
+        else if (cmd == "DISCARD") {
+            if (a.elems.size() == 1) {
+                if (client_in_transaction[client_fd]) {
+                    // Abort transaction - reset state and clear queue
+                    client_in_transaction[client_fd] = false;
+                    client_command_queue[client_fd].clear();
+                    reply = "+OK\r\n";
+                } else {
+                    reply = "-ERR DISCARD without MULTI\r\n";
+                }
+            } else {
+                reply = "-ERR wrong number of arguments for 'discard' command\r\n";
             }
         }
               
