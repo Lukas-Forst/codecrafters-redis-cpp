@@ -409,6 +409,116 @@ bool parse_resp_array_of_bulk_strings(const std::string& s, RespArray& arr) {
 
 // ------------- request handling -----------------
 
+// Helper function to execute a single command (without transaction logic)
+std::string execute_single_command(const RespArray& a, int client_fd) {
+    std::string reply;
+    std::string cmd = a.elems[0];
+    to_upper(cmd);
+
+    // Execute the command directly without transaction queuing logic
+    // This is essentially the same as handle_request but without the queuing check
+    if (cmd == "PING") {
+        if (a.elems.size() == 1) {
+            reply = "+PONG\r\n";
+        } else {
+            reply = "+" + a.elems[1] + "\r\n";
+        }
+    } else if (cmd == "ECHO") {
+        if (a.elems.size() == 2) {
+            const std::string& msg = a.elems[1];
+            reply = "$" + std::to_string(msg.size()) + "\r\n" + msg + "\r\n";
+        } else {
+            reply = "-ERR wrong number of arguments for 'echo' command\r\n";
+        }
+    } else if (cmd == "SET") {
+        if (a.elems.size() == 3) {
+            const std::string& key = a.elems[1];
+            const std::string& val = a.elems[2];
+            store.insert_or_assign(key, val);
+            ttl.erase(key);
+            reply = "+OK\r\n";
+        } else if (a.elems.size() == 5) {
+            const std::string& key = a.elems[1];
+            const std::string& val = a.elems[2];
+            std::string opt = a.elems[3];
+            to_upper(opt);
+            if (opt != "PX") {
+                reply = "-ERR syntax error\r\n";
+            } else {
+                long long ms = 0;
+                try {
+                    size_t idx = 0;
+                    ms = std::stoll(a.elems[4], &idx, 10);
+                    if (idx != a.elems[4].size() || ms < 0) {
+                        reply = "-ERR value is not an integer or out of range\r\n";
+                    } else {
+                        store.insert_or_assign(key, val);
+                        using clock = std::chrono::steady_clock;
+                        ttl[key] = clock::now() + std::chrono::milliseconds(ms);
+                        reply = "+OK\r\n";
+                    }
+                } catch (...) {
+                    reply = "-ERR value is not an integer or out of range\r\n";
+                }
+            }
+        } else {
+            reply = "-ERR wrong number of arguments for 'set' command\r\n";
+        }
+    } else if (cmd == "GET") {
+        if (a.elems.size() == 2) {
+            const std::string& key = a.elems[1];
+            if (is_expired_now(key)) {
+                reply = "$-1\r\n";
+            } else {
+                auto it = store.find(key);
+                if (it == store.end()) {
+                    reply = "$-1\r\n";
+                } else {
+                    const std::string& val = it->second;
+                    reply = "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                }
+            }
+        } else {
+            reply = "-ERR wrong number of arguments for 'get' command\r\n";
+        }
+    } else if (cmd == "INCR") {
+        if (a.elems.size() == 2) {
+            const std::string& key = a.elems[1];
+            if (is_expired_now(key)) {
+                reply = "-ERR value is not an integer or out of range\r\n";
+            } else {
+                auto it = store.find(key);
+                if (it == store.end()) {
+                    store[key] = "1";
+                    reply = ":1\r\n";
+                } else {
+                    const std::string& val = it->second;
+                    try {
+                        size_t idx = 0;
+                        long long num = std::stoll(val, &idx, 10);
+                        if (idx != val.size()) {
+                            reply = "-ERR value is not an integer or out of range\r\n";
+                        } else {
+                            num++;
+                            std::string new_val = std::to_string(num);
+                            store[key] = new_val;
+                            reply = ":" + std::to_string(num) + "\r\n";
+                        }
+                    } catch (...) {
+                        reply = "-ERR value is not an integer or out of range\r\n";
+                    }
+                }
+            }
+        } else {
+            reply = "-ERR wrong number of arguments for 'incr' command\r\n";
+        }
+    } else {
+        reply = "-ERR unknown command\r\n";
+    }
+    
+    return reply;
+}
+
 // Update to pass client_fd (same as my previous suggestion)
 std::string handle_request(const std::string& req, int client_fd) {
     RespArray a;
@@ -1096,12 +1206,11 @@ else if (cmd == "XREAD") {
                         // Empty transaction - return empty array
                         reply = "*0\r\n";
                     } else {
-                        // For now, just return array indicating we had queued commands
-                        // TODO: Execute queued commands and return their results
+                        // Execute queued commands and return their results
                         reply = "*" + std::to_string(queue.size()) + "\r\n";
-                        // Add placeholder results for each queued command
-                        for (size_t i = 0; i < queue.size(); ++i) {
-                            reply += "+OK\r\n"; // Placeholder result
+                        for (const auto& queued_command : queue) {
+                            std::string command_result = execute_single_command(queued_command, client_fd);
+                            reply += command_result;
                         }
                     }
                     
