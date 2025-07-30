@@ -259,6 +259,9 @@ struct RespArray {
     std::vector<std::string> elems;
 };
 
+// Command queue for transactions (after RespArray definition)
+static std::unordered_map<int, std::vector<RespArray>> client_command_queue;
+
 static bool parse_int(const std::string& s, size_t& pos, long& out) {
     size_t start = pos;
     bool neg = false;
@@ -415,7 +418,13 @@ std::string handle_request(const std::string& req, int client_fd) {
         std::string cmd = a.elems[0];
         to_upper(cmd);
 
-        if (cmd == "PING") {
+        // Check if client is in transaction and command should be queued
+        if (client_in_transaction[client_fd] && cmd != "MULTI" && cmd != "EXEC") {
+            // Queue the command
+            client_command_queue[client_fd].push_back(a);
+            reply = "+QUEUED\r\n";
+        }
+        else if (cmd == "PING") {
             if (a.elems.size() == 1) {
                 reply = "+PONG\r\n";
             } else {
@@ -1081,9 +1090,24 @@ else if (cmd == "XREAD") {
         else if (cmd == "EXEC") {
             if (a.elems.size() == 1) {
                 if (client_in_transaction[client_fd]) {
-                    // Empty transaction - return empty array
+                    // Check if we have queued commands
+                    auto& queue = client_command_queue[client_fd];
+                    if (queue.empty()) {
+                        // Empty transaction - return empty array
+                        reply = "*0\r\n";
+                    } else {
+                        // For now, just return array indicating we had queued commands
+                        // TODO: Execute queued commands and return their results
+                        reply = "*" + std::to_string(queue.size()) + "\r\n";
+                        // Add placeholder results for each queued command
+                        for (size_t i = 0; i < queue.size(); ++i) {
+                            reply += "+OK\r\n"; // Placeholder result
+                        }
+                    }
+                    
+                    // Reset transaction state and clear queue
                     client_in_transaction[client_fd] = false;
-                    reply = "*0\r\n";
+                    queue.clear();
                 } else {
                     reply = "-ERR EXEC without MULTI\r\n";
                 }
@@ -1132,6 +1156,7 @@ void handle_client(int client_fd) {
     
     // Clean up client transaction state when client disconnects
     client_in_transaction.erase(client_fd);
+    client_command_queue.erase(client_fd);
 }
 
 
