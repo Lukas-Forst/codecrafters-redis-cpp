@@ -1073,6 +1073,14 @@ else if (cmd == "XREAD") {
                 reply = "-ERR wrong number of arguments for 'multi' command\r\n";
             }
         }
+        
+        else if (cmd == "EXEC") {
+            if (a.elems.size() == 1) {
+                reply = "-ERR EXEC without MULTI\r\n";
+            } else {
+                reply = "-ERR wrong number of arguments for 'exec' command\r\n";
+            }
+        }
               
         else {
             reply = "-ERR unknown command\r\n";
