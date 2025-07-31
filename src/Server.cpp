@@ -1442,14 +1442,27 @@ int connect_to_master(const std::string& host, int port) {
     return fd;
 }
 
-void perform_handshake_with_master(const std::string& host, int port) {
-    int master_fd = connect_to_master(host, port);
+bool receive_response(int fd, std::string& response) {
+    char buffer[1024];
+    ssize_t bytes_received = recv(fd, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        return false;
+    }
+    buffer[bytes_received] = '\0';
+    response = std::string(buffer, bytes_received);
+    return true;
+}
+
+void perform_handshake_with_master(const std::string& host, int master_port, int replica_port) {
+    int master_fd = connect_to_master(host, master_port);
     if (master_fd < 0) {
         std::cerr << "Failed to connect to master, continuing as standalone replica\n";
         return;
     }
 
-    // Send PING command as RESP Array: *1\r\n$4\r\nPING\r\n
+    std::string response;
+
+    // Step 1: Send PING command as RESP Array: *1\r\n$4\r\nPING\r\n
     std::string ping_command = "*1\r\n$4\r\nPING\r\n";
     
     if (!send_all(master_fd, ping_command.data(), ping_command.size())) {
@@ -1458,10 +1471,57 @@ void perform_handshake_with_master(const std::string& host, int port) {
         return;
     }
 
-    std::cout << "Sent PING to master " << host << ":" << port << "\n";
+    std::cout << "Sent PING to master " << host << ":" << master_port << "\n";
 
-    // For now, we'll just close the connection after sending PING
-    // In later stages, we'll keep this connection open for further handshake steps
+    // Receive response to PING (should be +PONG\r\n)
+    if (!receive_response(master_fd, response)) {
+        std::cerr << "Failed to receive PING response from master\n";
+        close(master_fd);
+        return;
+    }
+
+    // Step 2: Send REPLCONF listening-port <PORT>
+    std::string port_str = std::to_string(replica_port);
+    std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
+                                       std::to_string(port_str.size()) + "\r\n" + port_str + "\r\n";
+    
+    if (!send_all(master_fd, replconf_port_command.data(), replconf_port_command.size())) {
+        std::cerr << "Failed to send REPLCONF listening-port to master\n";
+        close(master_fd);
+        return;
+    }
+
+    std::cout << "Sent REPLCONF listening-port " << replica_port << " to master\n";
+
+    // Receive response to REPLCONF listening-port (should be +OK\r\n)
+    if (!receive_response(master_fd, response)) {
+        std::cerr << "Failed to receive REPLCONF listening-port response from master\n";
+        close(master_fd);
+        return;
+    }
+
+    // Step 3: Send REPLCONF capa psync2
+    std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+    
+    if (!send_all(master_fd, replconf_capa_command.data(), replconf_capa_command.size())) {
+        std::cerr << "Failed to send REPLCONF capa psync2 to master\n";
+        close(master_fd);
+        return;
+    }
+
+    std::cout << "Sent REPLCONF capa psync2 to master\n";
+
+    // Receive response to REPLCONF capa psync2 (should be +OK\r\n)
+    if (!receive_response(master_fd, response)) {
+        std::cerr << "Failed to receive REPLCONF capa response from master\n";
+        close(master_fd);
+        return;
+    }
+
+    std::cout << "Handshake with master completed successfully\n";
+
+    // For now, we'll close the connection after completing the handshake
+    // In the next stage, we'll keep this connection open for PSYNC
     close(master_fd);
 }
 
@@ -1525,7 +1585,7 @@ int main(int argc, char* argv[]) {
     // If running as replica, perform handshake with master
     if (server_role == "slave") {
         std::cout << "Connecting to master " << master_host << ":" << master_port << " as replica...\n";
-        perform_handshake_with_master(master_host, master_port);
+        perform_handshake_with_master(master_host, master_port, port);
     }
 
     std::cout << "Waiting for a client to connect on port " << port << "...\n";
