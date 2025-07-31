@@ -1353,18 +1353,38 @@ int create_listen_socket(uint16_t port) {
 
 // ------------- main -----------------
 
-int main() {
+int main(int argc, char* argv[]) {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
     std::signal(SIGPIPE, SIG_IGN);
 
-    int server_fd = create_listen_socket(6379);
+    uint16_t port = 6379; // default port
+    
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--port" && i + 1 < argc) {
+            try {
+                int parsed_port = std::stoi(argv[i + 1]);
+                if (parsed_port < 1 || parsed_port > 65535) {
+                    std::cerr << "Invalid port number: " << argv[i + 1] << "\n";
+                    return 1;
+                }
+                port = static_cast<uint16_t>(parsed_port);
+                i++; // skip the port value argument
+            } catch (const std::exception&) {
+                std::cerr << "Invalid port number: " << argv[i + 1] << "\n";
+                return 1;
+            }
+        }
+    }
+
+    int server_fd = create_listen_socket(port);
     if (server_fd < 0) {
-        std::cerr << "Failed to setup server socket\n";
+        std::cerr << "Failed to setup server socket on port " << port << "\n";
         return 1;
     }
 
-    std::cout << "Waiting for a client to connect...\n";
+    std::cout << "Waiting for a client to connect on port " << port << "...\n";
     serve_forever(server_fd);
 
     close(server_fd);
