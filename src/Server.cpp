@@ -26,6 +26,11 @@ static std::unordered_map<std::string, std::chrono::steady_clock::time_point> tt
 
 static std::unordered_map<std::string, std::vector<std::string>> lists; // lists
 
+// Server role and replication settings
+static std::string server_role = "master";  // default role
+static std::string master_host = "";
+static int master_port = 0;
+
 // Transaction state per client
 static std::unordered_map<int, bool> client_in_transaction;
 
@@ -515,7 +520,7 @@ std::string execute_single_command(const RespArray& a, int client_fd) {
     } else if (cmd == "INFO") {
         if (a.elems.size() == 1) {
             // INFO without arguments - return all sections (for now just replication)
-            std::string info_response = "role:master\r\n";
+            std::string info_response = "role:" + server_role + "\r\n";
             reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
         } else if (a.elems.size() == 2) {
             std::string section = a.elems[1];
@@ -523,7 +528,7 @@ std::string execute_single_command(const RespArray& a, int client_fd) {
             
             if (section == "REPLICATION") {
                 // Return replication section
-                std::string info_response = "role:master\r\n";
+                std::string info_response = "role:" + server_role + "\r\n";
                 reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
             } else {
                 // Unknown section - return empty bulk string
@@ -1263,7 +1268,7 @@ else if (cmd == "XREAD") {
         else if (cmd == "INFO") {
             if (a.elems.size() == 1) {
                 // INFO without arguments - return all sections (for now just replication)
-                std::string info_response = "role:master\r\n";
+                std::string info_response = "role:" + server_role + "\r\n";
                 reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
             } else if (a.elems.size() == 2) {
                 std::string section = a.elems[1];
@@ -1271,7 +1276,7 @@ else if (cmd == "XREAD") {
                 
                 if (section == "REPLICATION") {
                     // Return replication section
-                    std::string info_response = "role:master\r\n";
+                    std::string info_response = "role:" + server_role + "\r\n";
                     reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
                 } else {
                     // Unknown section - return empty bulk string
@@ -1415,6 +1420,30 @@ int main(int argc, char* argv[]) {
                 i++; // skip the port value argument
             } catch (const std::exception&) {
                 std::cerr << "Invalid port number: " << argv[i + 1] << "\n";
+                return 1;
+            }
+        } else if (std::string(argv[i]) == "--replicaof" && i + 1 < argc) {
+            // Parse master host and port from the format "host port"
+            std::string replicaof_arg = argv[i + 1];
+            size_t space_pos = replicaof_arg.find(' ');
+            if (space_pos == std::string::npos) {
+                std::cerr << "Invalid --replicaof format. Expected: --replicaof \"host port\"\n";
+                return 1;
+            }
+            
+            master_host = replicaof_arg.substr(0, space_pos);
+            std::string port_str = replicaof_arg.substr(space_pos + 1);
+            
+            try {
+                master_port = std::stoi(port_str);
+                if (master_port < 1 || master_port > 65535) {
+                    std::cerr << "Invalid master port number: " << port_str << "\n";
+                    return 1;
+                }
+                server_role = "slave";
+                i++; // skip the replicaof value argument
+            } catch (const std::exception&) {
+                std::cerr << "Invalid master port number: " << port_str << "\n";
                 return 1;
             }
         }
