@@ -30,6 +30,8 @@ static std::unordered_map<std::string, std::vector<std::string>> lists; // lists
 static std::string server_role = "master";  // default role
 static std::string master_host = "";
 static int master_port = 0;
+static std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";  // 40 character replication ID
+static int master_repl_offset = 0;  // replication offset starts at 0
 
 // Transaction state per client
 static std::unordered_map<int, bool> client_in_transaction;
@@ -520,7 +522,9 @@ std::string execute_single_command(const RespArray& a, int client_fd) {
     } else if (cmd == "INFO") {
         if (a.elems.size() == 1) {
             // INFO without arguments - return all sections (for now just replication)
-            std::string info_response = "role:" + server_role + "\r\n";
+            std::string info_response = "role:" + server_role + "\r\n" +
+                                      "master_replid:" + master_replid + "\r\n" +
+                                      "master_repl_offset:" + std::to_string(master_repl_offset) + "\r\n";
             reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
         } else if (a.elems.size() == 2) {
             std::string section = a.elems[1];
@@ -528,7 +532,9 @@ std::string execute_single_command(const RespArray& a, int client_fd) {
             
             if (section == "REPLICATION") {
                 // Return replication section
-                std::string info_response = "role:" + server_role + "\r\n";
+                std::string info_response = "role:" + server_role + "\r\n" +
+                                          "master_replid:" + master_replid + "\r\n" +
+                                          "master_repl_offset:" + std::to_string(master_repl_offset) + "\r\n";
                 reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
             } else {
                 // Unknown section - return empty bulk string
@@ -1268,7 +1274,9 @@ else if (cmd == "XREAD") {
         else if (cmd == "INFO") {
             if (a.elems.size() == 1) {
                 // INFO without arguments - return all sections (for now just replication)
-                std::string info_response = "role:" + server_role + "\r\n";
+                std::string info_response = "role:" + server_role + "\r\n" +
+                                          "master_replid:" + master_replid + "\r\n" +
+                                          "master_repl_offset:" + std::to_string(master_repl_offset) + "\r\n";
                 reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
             } else if (a.elems.size() == 2) {
                 std::string section = a.elems[1];
@@ -1276,7 +1284,9 @@ else if (cmd == "XREAD") {
                 
                 if (section == "REPLICATION") {
                     // Return replication section
-                    std::string info_response = "role:" + server_role + "\r\n";
+                    std::string info_response = "role:" + server_role + "\r\n" +
+                                              "master_replid:" + master_replid + "\r\n" +
+                                              "master_repl_offset:" + std::to_string(master_repl_offset) + "\r\n";
                     reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
                 } else {
                     // Unknown section - return empty bulk string
