@@ -512,6 +512,26 @@ std::string execute_single_command(const RespArray& a, int client_fd) {
         } else {
             reply = "-ERR wrong number of arguments for 'incr' command\r\n";
         }
+    } else if (cmd == "INFO") {
+        if (a.elems.size() == 1) {
+            // INFO without arguments - return all sections (for now just replication)
+            std::string info_response = "role:master\r\n";
+            reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
+        } else if (a.elems.size() == 2) {
+            std::string section = a.elems[1];
+            to_upper(section);
+            
+            if (section == "REPLICATION") {
+                // Return replication section
+                std::string info_response = "role:master\r\n";
+                reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
+            } else {
+                // Unknown section - return empty bulk string
+                reply = "$0\r\n\r\n";
+            }
+        } else {
+            reply = "-ERR wrong number of arguments for 'info' command\r\n";
+        }
     } else {
         reply = "-ERR unknown command\r\n";
     }
@@ -1237,6 +1257,28 @@ else if (cmd == "XREAD") {
                 }
             } else {
                 reply = "-ERR wrong number of arguments for 'discard' command\r\n";
+            }
+        }
+        
+        else if (cmd == "INFO") {
+            if (a.elems.size() == 1) {
+                // INFO without arguments - return all sections (for now just replication)
+                std::string info_response = "role:master\r\n";
+                reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
+            } else if (a.elems.size() == 2) {
+                std::string section = a.elems[1];
+                to_upper(section);
+                
+                if (section == "REPLICATION") {
+                    // Return replication section
+                    std::string info_response = "role:master\r\n";
+                    reply = "$" + std::to_string(info_response.size()) + "\r\n" + info_response + "\r\n";
+                } else {
+                    // Unknown section - return empty bulk string
+                    reply = "$0\r\n\r\n";
+                }
+            } else {
+                reply = "-ERR wrong number of arguments for 'info' command\r\n";
             }
         }
               
