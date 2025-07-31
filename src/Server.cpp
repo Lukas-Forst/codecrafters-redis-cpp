@@ -1408,6 +1408,63 @@ int create_listen_socket(uint16_t port) {
     return fd;
 }
 
+// ------------- replica connection to master -----------------
+
+int connect_to_master(const std::string& host, int port) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "Failed to create socket for master connection\n";
+        return -1;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    
+    // Convert hostname to IP address
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
+        // If direct IP conversion fails, assume localhost
+        if (host == "localhost" || host == "127.0.0.1") {
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        } else {
+            std::cerr << "Failed to convert hostname to IP: " << host << "\n";
+            close(fd);
+            return -1;
+        }
+    }
+
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        std::cerr << "Failed to connect to master " << host << ":" << port << "\n";
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+void perform_handshake_with_master(const std::string& host, int port) {
+    int master_fd = connect_to_master(host, port);
+    if (master_fd < 0) {
+        std::cerr << "Failed to connect to master, continuing as standalone replica\n";
+        return;
+    }
+
+    // Send PING command as RESP Array: *1\r\n$4\r\nPING\r\n
+    std::string ping_command = "*1\r\n$4\r\nPING\r\n";
+    
+    if (!send_all(master_fd, ping_command.data(), ping_command.size())) {
+        std::cerr << "Failed to send PING to master\n";
+        close(master_fd);
+        return;
+    }
+
+    std::cout << "Sent PING to master " << host << ":" << port << "\n";
+
+    // For now, we'll just close the connection after sending PING
+    // In later stages, we'll keep this connection open for further handshake steps
+    close(master_fd);
+}
+
 // ------------- main -----------------
 
 int main(int argc, char* argv[]) {
@@ -1463,6 +1520,12 @@ int main(int argc, char* argv[]) {
     if (server_fd < 0) {
         std::cerr << "Failed to setup server socket on port " << port << "\n";
         return 1;
+    }
+
+    // If running as replica, perform handshake with master
+    if (server_role == "slave") {
+        std::cout << "Connecting to master " << master_host << ":" << master_port << " as replica...\n";
+        perform_handshake_with_master(master_host, master_port);
     }
 
     std::cout << "Waiting for a client to connect on port " << port << "...\n";
